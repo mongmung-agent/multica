@@ -1,5 +1,5 @@
 import { v7 as uuidv7 } from "uuid";
-import type { AgentEvent } from "@mariozechner/pi-agent-core";
+import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { Agent } from "./runner.js";
 import { Channel } from "./channel.js";
 import type { AgentOptions, Message } from "./types.js";
@@ -56,6 +56,22 @@ export class AsyncAgent {
   /** Continuously read channel stream (AgentEvent + error Messages) */
   read(): AsyncIterable<ChannelItem> {
     return this.channel;
+  }
+
+  /**
+   * Subscribe to agent events directly (supports multiple subscribers).
+   * Unlike read(), this allows multiple consumers to receive the same events.
+   */
+  subscribe(callback: (event: AgentEvent) => void): () => void {
+    console.log(`[AsyncAgent] Adding subscriber for agent: ${this.sessionId}`);
+    const unsubscribe = this.agent.subscribe((event) => {
+      console.log(`[AsyncAgent] Event received: ${event.type}`);
+      callback(event);
+    });
+    return () => {
+      console.log(`[AsyncAgent] Removing subscriber for agent: ${this.sessionId}`);
+      unsubscribe();
+    };
   }
 
   /** Returns a promise that resolves when the current message queue is drained */
@@ -197,5 +213,12 @@ export class AsyncAgent {
    */
   reloadSystemPrompt(): void {
     this.agent.reloadSystemPrompt();
+  }
+
+  /**
+   * Get all messages from the current session.
+   */
+  getMessages(): AgentMessage[] {
+    return this.agent.getMessages();
   }
 }

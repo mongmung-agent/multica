@@ -44,6 +44,23 @@ export interface ProfileData {
   userContent: string | undefined
 }
 
+// Local chat event types (for direct IPC communication without Gateway)
+export interface LocalChatEvent {
+  agentId: string
+  streamId?: string
+  type?: 'error'
+  content?: string
+  event?: {
+    type: 'message_start' | 'message_update' | 'message_end' | 'tool_execution_start' | 'tool_execution_end'
+    id?: string
+    message?: {
+      role: string
+      content?: Array<{ type: string; text?: string }>
+    }
+    [key: string]: unknown
+  }
+}
+
 // Available style options
 export const AGENT_STYLES = ['concise', 'warm', 'playful', 'professional'] as const
 export type AgentStyle = (typeof AGENT_STYLES)[number]
@@ -115,6 +132,27 @@ const electronAPI = {
     updateName: (name: string) => ipcRenderer.invoke('profile:updateName', name),
     updateStyle: (style: string) => ipcRenderer.invoke('profile:updateStyle', style),
     updateUser: (content: string) => ipcRenderer.invoke('profile:updateUser', content),
+  },
+
+  // Local chat (direct IPC, no Gateway required)
+  localChat: {
+    /** Subscribe to agent events for local direct chat */
+    subscribe: (agentId: string) => ipcRenderer.invoke('localChat:subscribe', agentId),
+    /** Unsubscribe from agent events */
+    unsubscribe: (agentId: string) => ipcRenderer.invoke('localChat:unsubscribe', agentId),
+    /** Get message history for local chat */
+    getHistory: (agentId: string): Promise<{ messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; agentId: string }> }> =>
+      ipcRenderer.invoke('localChat:getHistory', agentId),
+    /** Send message to agent via direct IPC (no Gateway) */
+    send: (agentId: string, content: string) => ipcRenderer.invoke('localChat:send', agentId, content),
+    /** Listen for agent events */
+    onEvent: (callback: (event: LocalChatEvent) => void) => {
+      ipcRenderer.on('localChat:event', (_event, data: LocalChatEvent) => callback(data))
+    },
+    /** Remove event listener */
+    offEvent: () => {
+      ipcRenderer.removeAllListeners('localChat:event')
+    },
   },
 }
 

@@ -85,6 +85,22 @@ interface ProfileData {
   userContent: string | undefined
 }
 
+interface LocalChatEvent {
+  agentId: string
+  streamId?: string
+  type?: 'error'
+  content?: string
+  event?: {
+    type: 'message_start' | 'message_update' | 'message_end' | 'tool_execution_start' | 'tool_execution_end'
+    id?: string
+    message?: {
+      role: string
+      content?: Array<{ type: string; text?: string }>
+    }
+    [key: string]: unknown
+  }
+}
+
 interface ElectronAPI {
   hub: {
     init: () => Promise<unknown>
@@ -128,6 +144,14 @@ interface ElectronAPI {
     updateName: (name: string) => Promise<unknown>
     updateStyle: (style: string) => Promise<unknown>
     updateUser: (content: string) => Promise<unknown>
+  }
+  localChat: {
+    subscribe: (agentId: string) => Promise<{ ok?: boolean; error?: string; alreadySubscribed?: boolean }>
+    unsubscribe: (agentId: string) => Promise<{ ok: boolean }>
+    getHistory: (agentId: string) => Promise<{ messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; agentId: string }> }>
+    send: (agentId: string, content: string) => Promise<{ ok?: boolean; error?: string }>
+    onEvent: (callback: (event: LocalChatEvent) => void) => void
+    offEvent: () => void
   }
 }
 

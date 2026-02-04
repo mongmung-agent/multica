@@ -482,6 +482,11 @@ export class Agent {
     return this.agent.state.tools?.map(t => t.name) ?? [];
   }
 
+  /** Get all messages from the current session */
+  getMessages(): AgentMessage[] {
+    return this.agent.state.messages.slice();
+  }
+
   /**
    * Get all skills with their eligibility status.
    * Returns empty array if skills are disabled.

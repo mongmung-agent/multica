@@ -4,14 +4,31 @@
  * Creates and manages a Hub instance that connects to the Gateway.
  * This follows the same pattern as the Console app.
  */
-import { ipcMain } from 'electron'
+import { ipcMain, type BrowserWindow } from 'electron'
 import { Hub } from '../../../../src/hub/hub.js'
 import type { ConnectionState } from '@multica/sdk'
 import type { AsyncAgent } from '../../../../src/agent/async-agent.js'
 
+/**
+ * Extract plain text from AgentMessage content (string or content block array).
+ */
+function extractTextContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((c: { type?: string }) => c.type === 'text')
+    .map((c: { text?: string }) => c.text ?? '')
+    .join('')
+}
+
 // Singleton Hub instance
 let hub: Hub | null = null
 let defaultAgentId: string | null = null
+let mainWindowRef: BrowserWindow | null = null
+
+// Track which agents have active IPC subscriptions (for local direct chat)
+// Value is the unsubscribe function returned by agent.subscribe()
+const ipcAgentSubscriptions = new Map<string, () => void>()
 
 /**
  * Safe log function that catches EPIPE errors.
@@ -219,7 +236,8 @@ export function registerHubIpcHandlers(): void {
   })
 
   /**
-   * Send a message to an agent.
+   * Send a message to an agent (for remote clients via Gateway).
+   * Note: For local direct chat, use 'localChat:send' instead.
    */
   ipcMain.handle('hub:sendMessage', async (_event, agentId: string, content: string) => {
     const h = getHub()
@@ -231,6 +249,135 @@ export function registerHubIpcHandlers(): void {
       return { error: `Agent is closed: ${agentId}` }
     }
     agent.write(content)
+    return { ok: true }
+  })
+
+  /**
+   * Subscribe to local agent events (for direct IPC chat without Gateway).
+   * Uses agent.subscribe() which supports multiple subscribers.
+   */
+  ipcMain.handle('localChat:subscribe', async (_event, agentId: string) => {
+    const h = getHub()
+    const agent = h.getAgent(agentId)
+    if (!agent) {
+      return { error: `Agent not found: ${agentId}` }
+    }
+    if (agent.closed) {
+      return { error: `Agent is closed: ${agentId}` }
+    }
+
+    // Already subscribed?
+    if (ipcAgentSubscriptions.has(agentId)) {
+      return { ok: true, alreadySubscribed: true }
+    }
+
+    // Track current stream ID for message grouping
+    let currentStreamId: string | null = null
+
+    // Subscribe to agent events using the multi-subscriber mechanism
+    const unsubscribe = agent.subscribe((event) => {
+      if (!mainWindowRef || mainWindowRef.isDestroyed()) {
+        return
+      }
+
+      // Filter events same as Hub.consumeAgent()
+      const maybeMessage = (event as { message?: { role?: string } }).message
+      const isAssistantMessage = maybeMessage?.role === 'assistant'
+      const shouldForward =
+        ((event.type === 'message_start' || event.type === 'message_update' || event.type === 'message_end') && isAssistantMessage)
+        || event.type === 'tool_execution_start'
+        || event.type === 'tool_execution_end'
+
+      if (!shouldForward) return
+
+      // Track stream ID for message grouping
+      if (event.type === 'message_start') {
+        currentStreamId = (event as { id?: string }).id ?? `stream-${Date.now()}`
+        safeLog(`[IPC] Starting stream: ${currentStreamId}`)
+      }
+
+      safeLog(`[IPC] Sending event to renderer: ${event.type}, streamId: ${currentStreamId}`)
+      mainWindowRef.webContents.send('localChat:event', {
+        agentId,
+        streamId: currentStreamId,
+        event,
+      })
+
+      if (event.type === 'message_end') {
+        safeLog(`[IPC] Ending stream: ${currentStreamId}`)
+        currentStreamId = null
+      }
+    })
+
+    ipcAgentSubscriptions.set(agentId, unsubscribe)
+    safeLog(`[IPC] Local chat subscribed to agent: ${agentId}`)
+
+    return { ok: true }
+  })
+
+  /**
+   * Unsubscribe from local agent events.
+   */
+  ipcMain.handle('localChat:unsubscribe', async (_event, agentId: string) => {
+    const unsubscribe = ipcAgentSubscriptions.get(agentId)
+    if (unsubscribe) {
+      unsubscribe()
+    }
+    ipcAgentSubscriptions.delete(agentId)
+    safeLog(`[IPC] Local chat unsubscribed from agent: ${agentId}`)
+    return { ok: true }
+  })
+
+  /**
+   * Get message history for local chat.
+   * Returns messages in the same format as useMessagesStore.
+   */
+  ipcMain.handle('localChat:getHistory', async (_event, agentId: string) => {
+    const h = getHub()
+    const agent = h.getAgent(agentId)
+    if (!agent) {
+      return { messages: [] }
+    }
+
+    try {
+      const sessionMessages = agent.getMessages()
+      const messages = sessionMessages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m, i) => ({
+          id: `history-${i}-${Date.now()}`,
+          role: m.role as 'user' | 'assistant',
+          content: extractTextContent((m as { content?: unknown }).content),
+          agentId,
+        }))
+        .filter((m) => m.content.length > 0)
+
+      return { messages }
+    } catch {
+      return { messages: [] }
+    }
+  })
+
+  /**
+   * Send a message via local direct IPC (no Gateway).
+   * Events will be pushed to renderer via 'localChat:event' channel.
+   */
+  ipcMain.handle('localChat:send', async (_event, agentId: string, content: string) => {
+    const h = getHub()
+    const agent = h.getAgent(agentId)
+    if (!agent) {
+      return { error: `Agent not found: ${agentId}` }
+    }
+    if (agent.closed) {
+      return { error: `Agent is closed: ${agentId}` }
+    }
+
+    // Must be subscribed first to receive events
+    if (!ipcAgentSubscriptions.has(agentId)) {
+      return { error: 'Not subscribed to agent events. Call subscribe first.' }
+    }
+
+    agent.write(content)
+    safeLog(`[IPC] Local chat message sent to agent: ${agentId}`)
     return { ok: true }
   })
 
@@ -264,9 +411,12 @@ export function registerHubIpcHandlers(): void {
 
 /**
  * Set up device confirmation flow between Hub (main process) and renderer.
+ * Also stores window reference for local chat IPC events.
  * Must be called after both Hub initialization and window creation.
  */
 export function setupDeviceConfirmation(mainWindow: Electron.BrowserWindow): void {
+  // Store reference for local chat IPC
+  mainWindowRef = mainWindow
   const h = getHub()
   const pendingConfirms = new Map<string, (allowed: boolean) => void>()
 
@@ -300,6 +450,12 @@ export function setupDeviceConfirmation(mainWindow: Electron.BrowserWindow): voi
  * Cleanup Hub resources.
  */
 export function cleanupHub(): void {
+  // Unsubscribe all IPC listeners
+  for (const unsubscribe of ipcAgentSubscriptions.values()) {
+    unsubscribe()
+  }
+  ipcAgentSubscriptions.clear()
+
   if (hub) {
     safeLog('[Desktop] Shutting down Hub')
     hub.shutdown()
