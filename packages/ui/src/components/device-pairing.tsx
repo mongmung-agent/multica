@@ -16,6 +16,29 @@ import { QrScannerView } from "@multica/ui/components/qr-scanner-view";
 import { MulticaIcon } from "@multica/ui/components/multica-icon";
 import { parseConnectionCode } from "@multica/store";
 
+function StatusWrapper({ fullscreen, children }: { fullscreen?: boolean; children: React.ReactNode }) {
+  return (
+    <div className={fullscreen
+      ? "fixed inset-0 z-50 bg-background flex flex-col items-center justify-center gap-5 px-6"
+      : "flex flex-col items-center justify-center h-full gap-5 px-4"
+    }>
+      {children}
+    </div>
+  );
+}
+
+function PairingHeader({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="text-center space-y-1">
+      <div className="flex items-center justify-center gap-2">
+        <MulticaIcon className="size-4.5 text-muted-foreground/50" />
+        <p className="text-base font-medium">{title}</p>
+      </div>
+      <p className="text-xs text-muted-foreground">{description}</p>
+    </div>
+  );
+}
+
 export interface ConnectionIdentity {
   gateway: string;
   hubId: string;
@@ -44,12 +67,8 @@ function ConnectionStatus({
 }) {
   const isVerifying = connectionState === "verifying";
 
-  const wrapper = fullscreen
-    ? "fixed inset-0 z-50 bg-background flex flex-col items-center justify-center gap-5 px-6"
-    : "flex flex-col items-center justify-center h-full gap-5 px-4";
-
   return (
-    <div className={wrapper}>
+    <StatusWrapper fullscreen={fullscreen}>
       <Spinner className="text-muted-foreground text-sm" />
       <div className="text-center space-y-1.5">
         <p className="text-base font-medium">
@@ -69,7 +88,7 @@ function ConnectionStatus({
       >
         Cancel
       </Button>
-    </div>
+    </StatusWrapper>
   );
 }
 
@@ -86,12 +105,8 @@ function RejectedStatus({
     return () => clearTimeout(timer);
   }, [onDismiss]);
 
-  const wrapper = fullscreen
-    ? "fixed inset-0 z-50 bg-background flex flex-col items-center justify-center gap-5 px-6"
-    : "flex flex-col items-center justify-center h-full gap-5 px-4";
-
   return (
-    <div className={wrapper}>
+    <StatusWrapper fullscreen={fullscreen}>
       <HugeiconsIcon
         icon={Alert02Icon}
         className="size-14 text-destructive animate-in zoom-in duration-300"
@@ -102,7 +117,7 @@ function RejectedStatus({
           The device owner declined this connection
         </p>
       </div>
-    </div>
+    </StatusWrapper>
   );
 }
 
@@ -207,15 +222,10 @@ export function DevicePairing({
   if (isMobile) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 px-4">
-        <div className="text-center space-y-1">
-          <div className="flex items-center justify-center gap-2">
-            <MulticaIcon className="size-4.5 text-muted-foreground/50" />
-            <p className="text-base font-medium">Scan to connect</p>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Scan a Multica QR code to connect to your agent
-          </p>
-        </div>
+        <PairingHeader
+          title="Scan to connect"
+          description="Scan a Multica QR code to connect to your agent"
+        />
         <QrScannerView onResult={handleScanResult} fullscreen />
       </div>
     );
@@ -223,20 +233,13 @@ export function DevicePairing({
 
   // Desktop: tab toggle (scan / paste)
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-4 px-4 mb-28">
-      <div className="text-center space-y-1">
-        <div className="flex items-center justify-center gap-2">
-          <MulticaIcon className="size-4.5 text-muted-foreground/50" />
-          <p className="text-base font-medium">
-            {mode === "scan" ? "Scan to connect" : "Paste to connect"}
-          </p>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          {mode === "scan"
-            ? "Scan a Multica QR code to connect to your agent"
-            : "Paste a Multica connection code to connect to your agent"}
-        </p>
-      </div>
+    <div className="flex flex-col items-center justify-center h-full gap-4 px-4 mb-14 sm:mb-28">
+      <PairingHeader
+        title={mode === "scan" ? "Scan to connect" : "Paste to connect"}
+        description={mode === "scan"
+          ? "Scan a Multica QR code to connect to your agent"
+          : "Paste a Multica connection code to connect to your agent"}
+      />
 
       {/* Mode toggle */}
       <div className="flex gap-1 bg-muted rounded-lg p-1">
