@@ -18,9 +18,13 @@
     "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
   ],
     "mac": {
-    "hardenedRuntime": false,
+    "hardenedRuntime": true,
+    "notarize": {
+      "teamId": ""
+    },
     "target": [
-      "dmg"
+      "dmg",
+      "zip"
     ],
     "artifactName": "${productName}-${version}-${arch}-mac.${ext}",
     "extendInfo": {
@@ -79,6 +83,6 @@
   "publish": {
     "provider": "github",
     "owner": "multica-ai",
-    "repo": "multica"
+    "repo": "super-multica"
   }
 }
