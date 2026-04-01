@@ -1,10 +1,10 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Bot, ChevronRight, Loader2, ArrowDown, Brain, AlertCircle, Clock, CheckCircle2, XCircle } from "lucide-react";
+import { Bot, ChevronRight, Loader2, ArrowDown, Brain, AlertCircle, Clock, CheckCircle2, XCircle, Square } from "lucide-react";
 import { api } from "@/shared/api";
 import { useWSEvent } from "@/features/realtime";
-import type { TaskMessagePayload, TaskCompletedPayload, TaskFailedPayload } from "@/shared/types/events";
+import type { TaskMessagePayload, TaskCompletedPayload, TaskFailedPayload, TaskCancelledPayload } from "@/shared/types/events";
 import type { AgentTask } from "@/shared/types/agent";
 import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -106,6 +106,7 @@ export function AgentLiveCard({ issueId, agentName }: AgentLiveCardProps) {
   const [items, setItems] = useState<TimelineItem[]>([]);
   const [elapsed, setElapsed] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
+  const [cancelling, setCancelling] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenSeqs = useRef(new Set<string>());
 
@@ -165,6 +166,7 @@ export function AgentLiveCard({ issueId, agentName }: AgentLiveCardProps) {
       setActiveTask(null);
       setItems([]);
       seenSeqs.current.clear();
+      setCancelling(false);
     }, [issueId]),
   );
 
@@ -176,6 +178,19 @@ export function AgentLiveCard({ issueId, agentName }: AgentLiveCardProps) {
       setActiveTask(null);
       setItems([]);
       seenSeqs.current.clear();
+      setCancelling(false);
+    }, [issueId]),
+  );
+
+  useWSEvent(
+    "task:cancelled",
+    useCallback((payload: unknown) => {
+      const p = payload as TaskCancelledPayload;
+      if (p.issue_id !== issueId) return;
+      setActiveTask(null);
+      setItems([]);
+      seenSeqs.current.clear();
+      setCancelling(false);
     }, [issueId]),
   );
 
@@ -215,6 +230,16 @@ export function AgentLiveCard({ issueId, agentName }: AgentLiveCardProps) {
     setAutoScroll(scrollHeight - scrollTop - clientHeight < 40);
   }, []);
 
+  const handleCancel = useCallback(async () => {
+    if (!activeTask || cancelling) return;
+    setCancelling(true);
+    try {
+      await api.cancelTask(issueId, activeTask.id);
+    } catch {
+      setCancelling(false);
+    }
+  }, [activeTask, issueId, cancelling]);
+
   if (!activeTask) return null;
 
   const toolCount = items.filter((i) => i.type === "tool_use").length;
@@ -236,6 +261,19 @@ export function AgentLiveCard({ issueId, agentName }: AgentLiveCardProps) {
             {toolCount} tool {toolCount === 1 ? "call" : "calls"}
           </span>
         )}
+        <button
+          onClick={handleCancel}
+          disabled={cancelling}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50 shrink-0"
+          title="Stop agent"
+        >
+          {cancelling ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Square className="h-3 w-3" />
+          )}
+          <span>Stop</span>
+        </button>
       </div>
 
       {/* Timeline content */}
@@ -302,7 +340,17 @@ export function TaskRunHistory({ issueId }: TaskRunHistoryProps) {
     }, [issueId]),
   );
 
-  const completedTasks = tasks.filter((t) => t.status === "completed" || t.status === "failed");
+  // Refresh when a task is cancelled
+  useWSEvent(
+    "task:cancelled",
+    useCallback((payload: unknown) => {
+      const p = payload as TaskCancelledPayload;
+      if (p.issue_id !== issueId) return;
+      api.listTasksByIssue(issueId).then(setTasks).catch(() => {});
+    }, [issueId]),
+  );
+
+  const completedTasks = tasks.filter((t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled");
   if (completedTasks.length === 0) return null;
 
   return (

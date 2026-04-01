@@ -682,7 +682,41 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 
 	_ = d.client.ReportProgress(ctx, task.ID, fmt.Sprintf("Launching %s", provider), 1, 2)
 
-	result, err := d.runTask(ctx, task, provider, taskLog)
+	// Create a cancellable context so we can interrupt the running agent
+	// when the server-side task status changes to 'cancelled'.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	// Poll for cancellation every 5 seconds while the task is running.
+	cancelledByPoll := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				if status, err := d.client.GetTaskStatus(ctx, task.ID); err == nil && status == "cancelled" {
+					taskLog.Info("task cancelled by server, interrupting agent")
+					runCancel()
+					close(cancelledByPoll)
+					return
+				}
+			}
+		}
+	}()
+
+	result, err := d.runTask(runCtx, task, provider, taskLog)
+
+	// Check if we were cancelled by the polling goroutine.
+	select {
+	case <-cancelledByPoll:
+		taskLog.Info("task cancelled during execution, discarding result")
+		return
+	default:
+	}
+
 	if err != nil {
 		taskLog.Error("task failed", "error", err)
 		if failErr := d.client.FailTask(ctx, task.ID, err.Error()); failErr != nil {

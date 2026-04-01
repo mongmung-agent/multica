@@ -27,6 +27,7 @@ const (
 	EventTaskCompleted = "task:completed"
 	EventTaskFailed    = "task:failed"
 	EventTaskMessage   = "task:message"
+	EventTaskCancelled = "task:cancelled"
 
 	// Inbox events
 	EventInboxNew           = "inbox:new"

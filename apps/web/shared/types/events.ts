@@ -21,6 +21,7 @@ export type WSEventType =
   | "task:completed"
   | "task:failed"
   | "task:message"
+  | "task:cancelled"
   | "inbox:new"
   | "inbox:read"
   | "inbox:archived"
@@ -173,6 +174,13 @@ export interface TaskCompletedPayload {
 }
 
 export interface TaskFailedPayload {
+  task_id: string;
+  agent_id: string;
+  issue_id: string;
+  status: string;
+}
+
+export interface TaskCancelledPayload {
   task_id: string;
   agent_id: string;
   issue_id: string;

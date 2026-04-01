@@ -104,6 +104,25 @@ func (s *TaskService) CancelTasksForIssue(ctx context.Context, issueID pgtype.UU
 	return s.Queries.CancelAgentTasksByIssue(ctx, issueID)
 }
 
+// CancelTask cancels a single task by ID. It broadcasts a task:cancelled event
+// so frontends can update immediately.
+func (s *TaskService) CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.AgentTaskQueue, error) {
+	task, err := s.Queries.CancelAgentTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("cancel task: %w", err)
+	}
+
+	slog.Info("task cancelled", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
+
+	// Reconcile agent status
+	s.ReconcileAgentStatus(ctx, task.AgentID)
+
+	// Broadcast cancellation as a task:failed event so frontends clear the live card
+	s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, task)
+
+	return &task, nil
+}
+
 // ClaimTask atomically claims the next queued task for an agent,
 // respecting max_concurrent_tasks.
 func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.AgentTaskQueue, error) {

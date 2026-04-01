@@ -525,6 +525,21 @@ func (h *Handler) GetActiveTaskForIssue(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"task": taskToResponse(tasks[0])})
 }
 
+// CancelTask cancels a running or queued task by ID.
+func (h *Handler) CancelTask(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskId")
+
+	task, err := h.TaskService.CancelTask(r.Context(), parseUUID(taskID))
+	if err != nil {
+		slog.Warn("cancel task failed", "task_id", taskID, "error", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	slog.Info("task cancelled by user", "task_id", taskID, "issue_id", uuidToString(task.IssueID))
+	writeJSON(w, http.StatusOK, taskToResponse(*task))
+}
+
 // ListTasksByIssue returns all tasks (any status) for an issue — used for execution history.
 func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 	issueID := chi.URLParam(r, "id")

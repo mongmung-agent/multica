@@ -107,6 +107,12 @@ WHERE (status = 'dispatched' AND dispatched_at < now() - make_interval(secs => @
    OR (status = 'running' AND started_at < now() - make_interval(secs => @running_timeout_secs::double precision))
 RETURNING id, agent_id, issue_id;
 
+-- name: CancelAgentTask :one
+UPDATE agent_task_queue
+SET status = 'cancelled', completed_at = now()
+WHERE id = $1 AND status IN ('queued', 'dispatched', 'running')
+RETURNING *;
+
 -- name: CountRunningTasks :one
 SELECT count(*) FROM agent_task_queue
 WHERE agent_id = $1 AND status IN ('dispatched', 'running');
