@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -23,6 +24,7 @@ func BuildPrompt(task Task) string {
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
 	fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
+	writeCollaborationPromptContext(&b, task)
 	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
 	return b.String()
 }
@@ -37,6 +39,7 @@ func buildCommentPrompt(task Task) string {
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
 	fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
+	writeCollaborationPromptContext(&b, task)
 	if task.TriggerCommentContent != "" {
 		authorLabel := "A user"
 		if task.TriggerAuthorType == "agent" {
@@ -55,6 +58,49 @@ func buildCommentPrompt(task Task) string {
 	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then decide how to proceed.\n\n", task.IssueID)
 	b.WriteString(execenv.BuildCommentReplyInstructions(task.IssueID, task.TriggerCommentID))
 	return b.String()
+}
+
+func writeCollaborationPromptContext(b *strings.Builder, task Task) {
+	if task.Collaboration == nil {
+		return
+	}
+	b.WriteString("Shared collaboration context is available for this task. Use it as the team workroom memory before deciding what to do next.\n")
+	if task.Collaboration.Role != "" {
+		fmt.Fprintf(b, "Your collaboration role is: %s\n", task.Collaboration.Role)
+	}
+	if task.Collaboration.AssignmentID != "" {
+		fmt.Fprintf(b, "Current assignment ID: %s\n", task.Collaboration.AssignmentID)
+	}
+	if len(task.Collaboration.TaskBrief) > 0 {
+		writePromptJSON(b, "Task brief", task.Collaboration.TaskBrief)
+	}
+	if len(task.Collaboration.Assignment) > 0 {
+		writePromptJSON(b, "Assignment", task.Collaboration.Assignment)
+	}
+	if len(task.Collaboration.TicketMemory) > 0 {
+		writePromptJSON(b, "Ticket memory snapshot", json.RawMessage(task.Collaboration.TicketMemory))
+	}
+	if len(task.Collaboration.RepoMemory) > 0 {
+		writePromptJSON(b, "Repo memory snapshot", json.RawMessage(task.Collaboration.RepoMemory))
+	}
+	if len(task.Collaboration.RecentHandoffs) > 0 {
+		writePromptJSON(b, "Prior handoffs", task.Collaboration.RecentHandoffs)
+	}
+	if task.Collaboration.Role == "orchestrator" {
+		b.WriteString("When finished, make your final output a JSON synthesis with keys: brief, assignments, dependencies, shared_notes, next_steps.\n")
+	}
+	if task.Collaboration.Role == "worker" {
+		b.WriteString("When finished, make your final output a JSON handoff with keys: summary, worked_on, evidence, validation, remaining_work, handoff_notes.\n")
+	}
+	b.WriteString("\n")
+}
+
+func writePromptJSON(b *strings.Builder, title string, value any) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(b, "%s:\n```json\n%s\n```\n", title, string(data))
 }
 
 // buildChatPrompt constructs a prompt for interactive chat tasks.

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	collab "github.com/multica-ai/multica/server/internal/collaboration"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
@@ -94,6 +95,70 @@ func TestBuildPromptNoIssueDetails(t *testing.T) {
 	for _, absent := range []string{"**Issue:**", "**Summary:**"} {
 		if strings.Contains(prompt, absent) {
 			t.Fatalf("prompt should NOT contain %q — agent fetches details via CLI", absent)
+		}
+	}
+}
+
+func TestBuildPromptIncludesCollaborationContext(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		IssueID: "issue-1",
+		Collaboration: &collab.PromptContext{
+			Role:         "worker",
+			AssignmentID: "assignment-1",
+			TaskBrief: map[string]any{
+				"goal": "Build shared workroom",
+			},
+			Assignment: map[string]any{
+				"goal": "Write worker handoff",
+			},
+			TicketMemory: json.RawMessage(`{"trigger_comment":{"content":"fresh user decision"}}`),
+			RepoMemory:   json.RawMessage(`{"guidance_files_to_read":["AGENTS.md","CLAUDE.md"]}`),
+			RecentHandoffs: []json.RawMessage{
+				json.RawMessage(`{"summary":"previous worker result"}`),
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"Shared collaboration context",
+		"worker",
+		"assignment-1",
+		"Build shared workroom",
+		"fresh user decision",
+		"CLAUDE.md",
+		"previous worker result",
+		"final output a JSON handoff",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing collaboration context %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildPromptIncludesOrchestratorSynthesisSchema(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		IssueID: "issue-1",
+		Collaboration: &collab.PromptContext{
+			Role: "orchestrator",
+			TaskBrief: map[string]any{
+				"goal": "Coordinate child work",
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"orchestrator",
+		"final output a JSON synthesis",
+		"assignments",
+		"shared_notes",
+		"next_steps",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing orchestrator context %q:\n%s", want, prompt)
 		}
 	}
 }

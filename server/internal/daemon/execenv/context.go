@@ -1,6 +1,7 @@
 package execenv
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,7 +161,50 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("\n")
 	}
 
+	if ctx.Collaboration != nil {
+		b.WriteString("## Shared Collaboration Context\n\n")
+		b.WriteString("Use this shared workroom context to continue the team effort instead of starting from a private session-only interpretation.\n\n")
+		if ctx.Collaboration.Role != "" {
+			fmt.Fprintf(&b, "**Role:** %s\n\n", ctx.Collaboration.Role)
+		}
+		if len(ctx.Collaboration.TaskBrief) > 0 {
+			writeJSONBlock(&b, "Task Brief", ctx.Collaboration.TaskBrief)
+		}
+		if len(ctx.Collaboration.TicketMemory) > 0 {
+			writeRawJSONBlock(&b, "Ticket Memory", ctx.Collaboration.TicketMemory)
+		}
+		if len(ctx.Collaboration.RepoMemory) > 0 {
+			writeRawJSONBlock(&b, "Repo Memory", ctx.Collaboration.RepoMemory)
+		}
+		if len(ctx.Collaboration.Assignment) > 0 {
+			writeJSONBlock(&b, "Current Assignment", ctx.Collaboration.Assignment)
+		}
+		if len(ctx.Collaboration.RecentHandoffs) > 0 {
+			writeRawJSONBlock(&b, "Prior Worker Handoffs", ctx.Collaboration.RecentHandoffs)
+		}
+	}
+
 	return b.String()
+}
+
+func writeJSONBlock(b *strings.Builder, title string, value any) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(b, "### %s\n\n```json\n%s\n```\n\n", title, string(data))
+}
+
+func writeRawJSONBlock(b *strings.Builder, title string, raw any) {
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		if bytes, ok := raw.([]byte); ok {
+			data = bytes
+		} else {
+			return
+		}
+	}
+	fmt.Fprintf(b, "### %s\n\n```json\n%s\n```\n\n", title, string(data))
 }
 
 func renderAutopilotContext(ctx TaskContextForEnv) string {

@@ -793,6 +793,11 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 				resp.PriorWorkDir = prior.WorkDir.String
 			}
 		}
+		if h.TaskService != nil && h.TaskService.Collaboration != nil {
+			if context, err := h.TaskService.Collaboration.PromptContext(r.Context(), *task); err == nil && context != nil {
+				resp.Collaboration = context
+			}
+		}
 	}
 
 	// Chat task: populate workspace/session info from the chat_session table.

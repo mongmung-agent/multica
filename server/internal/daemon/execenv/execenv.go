@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	collab "github.com/multica-ai/multica/server/internal/collaboration"
 )
 
 // RepoContextForEnv describes a workspace repo available for checkout.
@@ -45,6 +47,7 @@ type TaskContextForEnv struct {
 	AutopilotDescription    string
 	AutopilotSource         string
 	AutopilotTriggerPayload string
+	Collaboration           *collab.PromptContext
 }
 
 // SkillContextForEnv represents a skill to be written into the execution environment.

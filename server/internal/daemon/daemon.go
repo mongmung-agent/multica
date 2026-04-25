@@ -1051,6 +1051,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		AutopilotDescription:    task.AutopilotDescription,
 		AutopilotSource:         task.AutopilotSource,
 		AutopilotTriggerPayload: strings.TrimSpace(string(task.AutopilotTriggerPayload)),
+		Collaboration:           task.Collaboration,
 	}
 
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.

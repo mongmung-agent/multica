@@ -22,14 +22,15 @@ import (
 )
 
 type TaskService struct {
-	Queries   *db.Queries
-	TxStarter TxStarter
-	Hub       *realtime.Hub
-	Bus       *events.Bus
+	Queries       *db.Queries
+	TxStarter     TxStarter
+	Hub           *realtime.Hub
+	Bus           *events.Bus
+	Collaboration *CollaborationService
 }
 
 func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.Bus) *TaskService {
-	return &TaskService{Queries: q, TxStarter: tx, Hub: hub, Bus: bus}
+	return &TaskService{Queries: q, TxStarter: tx, Hub: hub, Bus: bus, Collaboration: NewCollaborationService(q)}
 }
 
 // EnqueueTaskForIssue creates a queued task for an agent-assigned issue.
@@ -60,16 +61,26 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 		commentID = triggerCommentID[0]
 	}
 
-	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+	taskContext, assignment, err := s.Collaboration.PrepareIssueTask(ctx, issue, issue.AssigneeID, commentID)
+	if err != nil {
+		slog.Error("task enqueue collaboration setup failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("prepare collaboration: %w", err)
+	}
+
+	task, err := s.Queries.CreateAgentTaskWithContext(ctx, db.CreateAgentTaskWithContextParams{
 		AgentID:          issue.AssigneeID,
 		RuntimeID:        agent.RuntimeID,
 		IssueID:          issue.ID,
 		Priority:         priorityToInt(issue.Priority),
 		TriggerCommentID: commentID,
+		Context:          taskContext,
 	})
 	if err != nil {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("create task: %w", err)
+	}
+	if err := s.Collaboration.AttachTaskToAssignment(ctx, assignment.ID, task.ID); err != nil {
+		slog.Warn("attach collaboration assignment to task failed", "issue_id", util.UUIDToString(issue.ID), "task_id", util.UUIDToString(task.ID), "error", err)
 	}
 
 	slog.Info("task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(issue.AssigneeID))
@@ -94,16 +105,26 @@ func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue,
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
 
-	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+	taskContext, assignment, err := s.Collaboration.PrepareIssueTask(ctx, issue, agentID, triggerCommentID)
+	if err != nil {
+		slog.Error("mention task collaboration setup failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("prepare collaboration: %w", err)
+	}
+
+	task, err := s.Queries.CreateAgentTaskWithContext(ctx, db.CreateAgentTaskWithContextParams{
 		AgentID:          agentID,
 		RuntimeID:        agent.RuntimeID,
 		IssueID:          issue.ID,
 		Priority:         priorityToInt(issue.Priority),
 		TriggerCommentID: triggerCommentID,
+		Context:          taskContext,
 	})
 	if err != nil {
 		slog.Error("mention task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("create task: %w", err)
+	}
+	if err := s.Collaboration.AttachTaskToAssignment(ctx, assignment.ID, task.ID); err != nil {
+		slog.Warn("attach collaboration assignment to mention task failed", "issue_id", util.UUIDToString(issue.ID), "task_id", util.UUIDToString(task.ID), "error", err)
 	}
 
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
@@ -176,7 +197,7 @@ func (s *TaskService) CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.A
 func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	start := time.Now()
 	var (
-		outcome                                                            = "unknown"
+		outcome                                                              = "unknown"
 		getAgentMs, countRunningMs, claimAgentMs, updateStatusMs, dispatchMs int64
 	)
 	defer func() {
@@ -241,10 +262,10 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	start := time.Now()
 	var (
-		outcome             = "no_task"
-		listMs, loopMs      int64
-		listCount, tried    int
-		claimedFlag         bool
+		outcome          = "no_task"
+		listMs, loopMs   int64
+		listCount, tried int
+		claimedFlag      bool
 	)
 	defer func() {
 		totalMs := time.Since(start).Milliseconds()
@@ -404,6 +425,14 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 
 	slog.Info("task completed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 
+	var completionPayload protocol.TaskCompletedPayload
+	_ = json.Unmarshal(result, &completionPayload)
+	if s.Collaboration != nil {
+		if err := s.Collaboration.RecordTaskCompletion(ctx, task, completionPayload); err != nil {
+			slog.Warn("record collaboration handoff failed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID), "error", err)
+		}
+	}
+
 	// Invariant: every completed issue task must have at least one agent
 	// comment on the issue, so the user always sees something when a run
 	// ends. If the agent posted a comment during execution (result, progress
@@ -419,11 +448,8 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 			Since:    task.StartedAt,
 		})
 		if !agentCommented {
-			var payload protocol.TaskCompletedPayload
-			if err := json.Unmarshal(result, &payload); err == nil {
-				if payload.Output != "" {
-					s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(payload.Output), "comment", task.TriggerCommentID)
-				}
+			if completionPayload.Output != "" {
+				s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(completionPayload.Output), "comment", task.TriggerCommentID)
 			}
 		}
 	}
@@ -431,12 +457,11 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	// For chat tasks, save assistant reply and broadcast chat:done. The
 	// resume pointer was already persisted inside the transaction above.
 	if task.ChatSessionID.Valid {
-		var payload protocol.TaskCompletedPayload
-		if err := json.Unmarshal(result, &payload); err == nil && payload.Output != "" {
+		if completionPayload.Output != "" {
 			if _, err := s.Queries.CreateChatMessage(ctx, db.CreateChatMessageParams{
 				ChatSessionID: task.ChatSessionID,
 				Role:          "assistant",
-				Content:       redact.Text(payload.Output),
+				Content:       redact.Text(completionPayload.Output),
 				TaskID:        task.ID,
 			}); err != nil {
 				slog.Error("failed to save assistant chat message", "task_id", util.UUIDToString(task.ID), "error", err)

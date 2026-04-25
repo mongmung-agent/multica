@@ -76,6 +76,92 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestCreateChildIssueCreatesCollaborationWorkroomAndWorkerAssignment(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	pmAgentID := createHandlerTestAgent(t, "Collaboration PM", nil)
+	workerAgentID := createHandlerTestAgent(t, "Collaboration Worker", nil)
+	var parentID, childID string
+	defer func() {
+		for _, issueID := range []string{childID, parentID} {
+			if issueID == "" {
+				continue
+			}
+			req := newRequest("DELETE", "/api/issues/"+issueID, nil)
+			req = withURLParam(req, "id", issueID)
+			testHandler.DeleteIssue(httptest.NewRecorder(), req)
+		}
+	}()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Parent collaboration goal",
+		"status":        "backlog",
+		"assignee_type": "agent",
+		"assignee_id":   pmAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue parent: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var parent IssueResponse
+	json.NewDecoder(w.Body).Decode(&parent)
+	parentID = parent.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           "Worker collaboration task",
+		"parent_issue_id": parentID,
+		"status":          "todo",
+		"assignee_type":   "agent",
+		"assignee_id":     workerAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue child: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var child IssueResponse
+	json.NewDecoder(w.Body).Decode(&child)
+	childID = child.ID
+
+	var role, workroomIssueID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT ca.role, cw.issue_id::text
+		FROM collaboration_assignment ca
+		JOIN collaboration_workroom cw ON cw.id = ca.workroom_id
+		WHERE ca.agent_id = $1
+		ORDER BY ca.created_at DESC
+		LIMIT 1
+	`, workerAgentID).Scan(&role, &workroomIssueID); err != nil {
+		t.Fatalf("load collaboration assignment: %v", err)
+	}
+	if role != "worker" {
+		t.Fatalf("expected worker assignment role, got %q", role)
+	}
+	if workroomIssueID != parentID {
+		t.Fatalf("expected child task to use parent workroom %s, got %s", parentID, workroomIssueID)
+	}
+
+	var repoMemory []byte
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT cms.payload
+		FROM collaboration_memory_snapshot cms
+		JOIN collaboration_workroom cw ON cw.id = cms.workroom_id
+		WHERE cw.issue_id = $1 AND cms.kind = 'repo'
+		ORDER BY cms.created_at DESC
+		LIMIT 1
+	`, parentID).Scan(&repoMemory); err != nil {
+		t.Fatalf("load repo memory snapshot: %v", err)
+	}
+	for _, want := range []string{"validation_commands", "package_boundaries", "CLAUDE.md"} {
+		if !strings.Contains(string(repoMemory), want) {
+			t.Fatalf("repo memory snapshot missing %q: %s", want, string(repoMemory))
+		}
+	}
+}
+
 func setupHandlerTestFixture(ctx context.Context, pool *pgxpool.Pool) (string, string, error) {
 	if err := cleanupHandlerTestFixture(ctx, pool); err != nil {
 		return "", "", err
@@ -826,7 +912,7 @@ func TestSendCodeDbError(t *testing.T) {
 	// We can't easily mock the DB here without changing architecture,
 	// but we can simulate a DB error by closing the pool temporarily or
 	// using a cancelled context if the query respects it.
-	
+
 	// Create a handler with a "broken" queries object is hard because it's a struct.
 	// Instead, let's use a context that is already cancelled.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -841,13 +927,13 @@ func TestSendCodeDbError(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	testHandler.SendCode(w, req)
-	
+
 	// If the DB query respects the cancelled context, it should return an error.
 	// pgx usually returns context.Canceled which is not what isNotFound checks for.
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("SendCode (db error): expected 500, got %d: %s", w.Code, w.Body.String())
 	}
-	
+
 	var resp map[string]string
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["error"] != "failed to lookup user" {

@@ -176,6 +176,66 @@ type ChatSession struct {
 	UnreadSince pgtype.Timestamptz `json:"unread_since"`
 }
 
+type CollaborationAssignment struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkroomID      pgtype.UUID        `json:"workroom_id"`
+	TaskID          pgtype.UUID        `json:"task_id"`
+	AgentID         pgtype.UUID        `json:"agent_id"`
+	Role            string             `json:"role"`
+	Goal            string             `json:"goal"`
+	Context         string             `json:"context"`
+	OwnedScope      []byte             `json:"owned_scope"`
+	Inputs          []byte             `json:"inputs"`
+	ExpectedHandoff []byte             `json:"expected_handoff"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CollaborationEvent struct {
+	ID           pgtype.UUID        `json:"id"`
+	WorkroomID   pgtype.UUID        `json:"workroom_id"`
+	EventType    string             `json:"event_type"`
+	ActorAgentID pgtype.UUID        `json:"actor_agent_id"`
+	TaskID       pgtype.UUID        `json:"task_id"`
+	Payload      []byte             `json:"payload"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type CollaborationHandoff struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkroomID    pgtype.UUID        `json:"workroom_id"`
+	AssignmentID  pgtype.UUID        `json:"assignment_id"`
+	TaskID        pgtype.UUID        `json:"task_id"`
+	AgentID       pgtype.UUID        `json:"agent_id"`
+	Summary       string             `json:"summary"`
+	WorkedOn      []byte             `json:"worked_on"`
+	Evidence      []byte             `json:"evidence"`
+	Validation    []byte             `json:"validation"`
+	RemainingWork []byte             `json:"remaining_work"`
+	HandoffNotes  []byte             `json:"handoff_notes"`
+	RawPayload    []byte             `json:"raw_payload"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type CollaborationMemorySnapshot struct {
+	ID         pgtype.UUID        `json:"id"`
+	WorkroomID pgtype.UUID        `json:"workroom_id"`
+	Kind       string             `json:"kind"`
+	Payload    []byte             `json:"payload"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type CollaborationWorkroom struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	Goal           string             `json:"goal"`
+	CurrentSummary string             `json:"current_summary"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Comment struct {
 	ID          pgtype.UUID        `json:"id"`
 	IssueID     pgtype.UUID        `json:"issue_id"`
