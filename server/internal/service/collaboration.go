@@ -82,18 +82,18 @@ func (s *CollaborationService) AttachTaskToAssignment(ctx context.Context, assig
 	return nil
 }
 
-func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db.AgentTaskQueue, payload protocol.TaskCompletedPayload) error {
+func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db.AgentTaskQueue, payload protocol.TaskCompletedPayload) ([]db.CollaborationAssignment, error) {
 	if !task.IssueID.Valid || len(task.Context) == 0 {
-		return nil
+		return nil, nil
 	}
 	taskContext, err := collab.DecodeTaskContext(task.Context)
 	if err != nil || taskContext.WorkroomID == "" || taskContext.AssignmentID == "" {
-		return nil
+		return nil, nil
 	}
 	workroomID := util.ParseUUID(taskContext.WorkroomID)
 	assignmentID := util.ParseUUID(taskContext.AssignmentID)
 	if !workroomID.Valid || !assignmentID.Valid {
-		return nil
+		return nil, nil
 	}
 
 	handoff, raw := parseHandoffPayload(payload.Output)
@@ -118,7 +118,7 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 			HandoffNotes:  mustJSON(handoff.HandoffNotes),
 			RawPayload:    raw,
 		}); err != nil {
-			return fmt.Errorf("record worker handoff: %w", err)
+			return nil, fmt.Errorf("record worker handoff: %w", err)
 		}
 		_, _ = s.Queries.MarkCollaborationAssignmentHandoffSubmitted(ctx, assignmentID)
 		_, _ = s.Queries.CreateCollaborationEvent(ctx, db.CreateCollaborationEventParams{
@@ -128,10 +128,11 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 			TaskID:       task.ID,
 			Payload:      raw,
 		})
-		return nil
+		return nil, nil
 	}
 
 	orchestratorOutput := parseOrchestratorOutput(payload.Output)
+	var createdAssignments []db.CollaborationAssignment
 	eventType := collab.EventBriefCreated
 	if handoffs, err := s.Queries.ListCollaborationHandoffs(ctx, workroomID); err == nil && len(handoffs) > 0 {
 		eventType = collab.EventOrchestratorSynthesisAdded
@@ -144,9 +145,41 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 		Payload:      raw,
 	})
 	for _, spec := range orchestratorOutput.Assignments {
-		_, _ = s.createAssignmentFromSpec(ctx, workroomID, spec)
+		assignment, err := s.createAssignmentFromSpec(ctx, workroomID, spec)
+		if err != nil {
+			return createdAssignments, err
+		}
+		createdAssignments = append(createdAssignments, assignment)
 	}
-	return nil
+	return createdAssignments, nil
+}
+
+func (s *CollaborationService) TaskContextForAssignment(ctx context.Context, assignment db.CollaborationAssignment, issueID pgtype.UUID) ([]byte, error) {
+	workroom, err := s.Queries.GetCollaborationWorkroom(ctx, assignment.WorkroomID)
+	if err != nil {
+		return nil, fmt.Errorf("load collaboration workroom: %w", err)
+	}
+	issue, err := s.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("load collaboration assignment issue: %w", err)
+	}
+	ticketMemory, err := s.createTicketMemorySnapshot(ctx, workroom, issue, pgtype.UUID{})
+	if err != nil {
+		return nil, err
+	}
+	repoMemory, err := s.createRepoMemorySnapshot(ctx, workroom)
+	if err != nil {
+		return nil, err
+	}
+	return collab.EncodeTaskContext(collab.TaskContext{
+		Role:                 assignment.Role,
+		WorkroomID:           util.UUIDToString(assignment.WorkroomID),
+		TicketMemoryID:       util.UUIDToString(ticketMemory.ID),
+		RepoMemoryID:         util.UUIDToString(repoMemory.ID),
+		AssignmentID:         util.UUIDToString(assignment.ID),
+		CurrentIssueID:       util.UUIDToString(issueID),
+		CollaborationVersion: 1,
+	})
 }
 
 func (s *CollaborationService) PromptContext(ctx context.Context, task db.AgentTaskQueue) (*collab.PromptContext, error) {
@@ -348,6 +381,7 @@ func (s *CollaborationService) createAssignment(ctx context.Context, workroom db
 	}
 	assignment, err := s.Queries.CreateCollaborationAssignment(ctx, db.CreateCollaborationAssignmentParams{
 		WorkroomID:      workroom.ID,
+		TargetIssueID:   issue.ID,
 		AgentID:         agentID,
 		Role:            role,
 		Goal:            issue.Title,
@@ -373,6 +407,14 @@ func (s *CollaborationService) createAssignment(ctx context.Context, workroom db
 }
 
 func (s *CollaborationService) createAssignmentFromSpec(ctx context.Context, workroomID pgtype.UUID, spec collab.AssignmentSpec) (db.CollaborationAssignment, error) {
+	workroom, err := s.Queries.GetCollaborationWorkroom(ctx, workroomID)
+	if err != nil {
+		return db.CollaborationAssignment{}, fmt.Errorf("load collaboration workroom for assignment: %w", err)
+	}
+	targetIssueID := util.ParseUUID(spec.IssueID)
+	if !targetIssueID.Valid {
+		targetIssueID = workroom.IssueID
+	}
 	role := spec.Role
 	if role != collab.RoleOrchestrator && role != collab.RoleWorker {
 		role = collab.RoleWorker
@@ -387,6 +429,7 @@ func (s *CollaborationService) createAssignmentFromSpec(ctx context.Context, wor
 	}
 	assignment, err := s.Queries.CreateCollaborationAssignment(ctx, db.CreateCollaborationAssignmentParams{
 		WorkroomID:      workroomID,
+		TargetIssueID:   targetIssueID,
 		AgentID:         util.ParseUUID(spec.AgentID),
 		Role:            role,
 		Goal:            strings.TrimSpace(spec.Goal),

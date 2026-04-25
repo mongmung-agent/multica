@@ -56,6 +56,7 @@ type OrchestratorOutput struct {
 }
 
 type AssignmentSpec struct {
+	IssueID         string   `json:"issue_id,omitempty"`
 	AgentID         string   `json:"agent_id,omitempty"`
 	Role            string   `json:"role,omitempty"`
 	Goal            string   `json:"goal"`

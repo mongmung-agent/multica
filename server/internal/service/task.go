@@ -428,8 +428,14 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	var completionPayload protocol.TaskCompletedPayload
 	_ = json.Unmarshal(result, &completionPayload)
 	if s.Collaboration != nil {
-		if err := s.Collaboration.RecordTaskCompletion(ctx, task, completionPayload); err != nil {
+		assignments, err := s.Collaboration.RecordTaskCompletion(ctx, task, completionPayload)
+		if err != nil {
 			slog.Warn("record collaboration handoff failed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID), "error", err)
+		}
+		for _, assignment := range assignments {
+			if _, err := s.EnqueueTaskForCollaborationAssignment(ctx, assignment); err != nil {
+				slog.Warn("enqueue collaboration assignment failed", "assignment_id", util.UUIDToString(assignment.ID), "workroom_id", util.UUIDToString(assignment.WorkroomID), "error", err)
+			}
 		}
 	}
 
@@ -485,6 +491,51 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	s.broadcastTaskEvent(ctx, protocol.EventTaskCompleted, task)
 
 	return &task, nil
+}
+
+func (s *TaskService) EnqueueTaskForCollaborationAssignment(ctx context.Context, assignment db.CollaborationAssignment) (db.AgentTaskQueue, error) {
+	if s.Collaboration == nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("collaboration service unavailable")
+	}
+	if !assignment.AgentID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("collaboration assignment has no agent")
+	}
+	if !assignment.TargetIssueID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("collaboration assignment has no target issue")
+	}
+	agent, err := s.Queries.GetAgent(ctx, assignment.AgentID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("load assignment agent: %w", err)
+	}
+	if agent.ArchivedAt.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("assignment agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("assignment agent has no runtime")
+	}
+	issue, err := s.Queries.GetIssue(ctx, assignment.TargetIssueID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("load assignment target issue: %w", err)
+	}
+	taskContext, err := s.Collaboration.TaskContextForAssignment(ctx, assignment, issue.ID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("build assignment task context: %w", err)
+	}
+	task, err := s.Queries.CreateAgentTaskWithContext(ctx, db.CreateAgentTaskWithContextParams{
+		AgentID:   assignment.AgentID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   issue.ID,
+		Priority:  priorityToInt(issue.Priority),
+		Context:   taskContext,
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("create assignment task: %w", err)
+	}
+	if err := s.Collaboration.AttachTaskToAssignment(ctx, assignment.ID, task.ID); err != nil {
+		return db.AgentTaskQueue{}, err
+	}
+	slog.Info("collaboration assignment enqueued", "assignment_id", util.UUIDToString(assignment.ID), "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(assignment.AgentID))
+	return task, nil
 }
 
 // FailTask marks a task as failed.

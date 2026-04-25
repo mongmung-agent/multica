@@ -13,14 +13,25 @@ import (
 
 const createCollaborationAssignment = `-- name: CreateCollaborationAssignment :one
 INSERT INTO collaboration_assignment (
-    workroom_id, agent_id, role, goal, context,
+    workroom_id, target_issue_id, agent_id, role, goal, context,
     owned_scope, inputs, expected_handoff
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at
+) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9
+)
+RETURNING id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at, target_issue_id
 `
 
 type CreateCollaborationAssignmentParams struct {
 	WorkroomID      pgtype.UUID `json:"workroom_id"`
+	TargetIssueID   pgtype.UUID `json:"target_issue_id"`
 	AgentID         pgtype.UUID `json:"agent_id"`
 	Role            string      `json:"role"`
 	Goal            string      `json:"goal"`
@@ -33,6 +44,7 @@ type CreateCollaborationAssignmentParams struct {
 func (q *Queries) CreateCollaborationAssignment(ctx context.Context, arg CreateCollaborationAssignmentParams) (CollaborationAssignment, error) {
 	row := q.db.QueryRow(ctx, createCollaborationAssignment,
 		arg.WorkroomID,
+		arg.TargetIssueID,
 		arg.AgentID,
 		arg.Role,
 		arg.Goal,
@@ -56,6 +68,7 @@ func (q *Queries) CreateCollaborationAssignment(ctx context.Context, arg CreateC
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TargetIssueID,
 	)
 	return i, err
 }
@@ -176,7 +189,7 @@ func (q *Queries) CreateCollaborationMemorySnapshot(ctx context.Context, arg Cre
 }
 
 const getCollaborationAssignment = `-- name: GetCollaborationAssignment :one
-SELECT id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at FROM collaboration_assignment
+SELECT id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at, target_issue_id FROM collaboration_assignment
 WHERE id = $1
 `
 
@@ -197,12 +210,13 @@ func (q *Queries) GetCollaborationAssignment(ctx context.Context, id pgtype.UUID
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TargetIssueID,
 	)
 	return i, err
 }
 
 const getCollaborationAssignmentByTask = `-- name: GetCollaborationAssignmentByTask :one
-SELECT id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at FROM collaboration_assignment
+SELECT id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at, target_issue_id FROM collaboration_assignment
 WHERE task_id = $1
 `
 
@@ -223,6 +237,7 @@ func (q *Queries) GetCollaborationAssignmentByTask(ctx context.Context, taskID p
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TargetIssueID,
 	)
 	return i, err
 }
@@ -293,7 +308,7 @@ func (q *Queries) GetLatestCollaborationMemorySnapshotByKind(ctx context.Context
 }
 
 const listCollaborationAssignments = `-- name: ListCollaborationAssignments :many
-SELECT id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at FROM collaboration_assignment
+SELECT id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at, target_issue_id FROM collaboration_assignment
 WHERE workroom_id = $1
 ORDER BY created_at ASC
 `
@@ -321,6 +336,7 @@ func (q *Queries) ListCollaborationAssignments(ctx context.Context, workroomID p
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.TargetIssueID,
 		); err != nil {
 			return nil, err
 		}
@@ -442,7 +458,7 @@ const markCollaborationAssignmentHandoffSubmitted = `-- name: MarkCollaborationA
 UPDATE collaboration_assignment
 SET status = 'handoff_submitted', updated_at = now()
 WHERE id = $1
-RETURNING id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at
+RETURNING id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at, target_issue_id
 `
 
 func (q *Queries) MarkCollaborationAssignmentHandoffSubmitted(ctx context.Context, id pgtype.UUID) (CollaborationAssignment, error) {
@@ -462,6 +478,7 @@ func (q *Queries) MarkCollaborationAssignmentHandoffSubmitted(ctx context.Contex
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TargetIssueID,
 	)
 	return i, err
 }
@@ -470,7 +487,7 @@ const setCollaborationAssignmentTask = `-- name: SetCollaborationAssignmentTask 
 UPDATE collaboration_assignment
 SET task_id = $2, status = 'running', updated_at = now()
 WHERE id = $1
-RETURNING id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at
+RETURNING id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at, target_issue_id
 `
 
 type SetCollaborationAssignmentTaskParams struct {
@@ -495,6 +512,7 @@ func (q *Queries) SetCollaborationAssignmentTask(ctx context.Context, arg SetCol
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TargetIssueID,
 	)
 	return i, err
 }

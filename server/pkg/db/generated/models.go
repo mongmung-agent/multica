@@ -190,6 +190,7 @@ type CollaborationAssignment struct {
 	Status          string             `json:"status"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	TargetIssueID   pgtype.UUID        `json:"target_issue_id"`
 }
 
 type CollaborationEvent struct {

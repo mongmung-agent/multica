@@ -39,9 +39,19 @@ LIMIT 1;
 
 -- name: CreateCollaborationAssignment :one
 INSERT INTO collaboration_assignment (
-    workroom_id, agent_id, role, goal, context,
+    workroom_id, target_issue_id, agent_id, role, goal, context,
     owned_scope, inputs, expected_handoff
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+) VALUES (
+    sqlc.arg(workroom_id),
+    sqlc.narg(target_issue_id),
+    sqlc.narg(agent_id),
+    sqlc.arg(role),
+    sqlc.arg(goal),
+    sqlc.arg(context),
+    sqlc.arg(owned_scope),
+    sqlc.arg(inputs),
+    sqlc.arg(expected_handoff)
+)
 RETURNING *;
 
 -- name: SetCollaborationAssignmentTask :one

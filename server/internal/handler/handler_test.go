@@ -162,6 +162,118 @@ func TestCreateChildIssueCreatesCollaborationWorkroomAndWorkerAssignment(t *test
 	}
 }
 
+func TestOrchestratorCompletionEnqueuesAssignmentTask(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	pmAgentID := createHandlerTestAgent(t, "Collaboration Loop PM", nil)
+	workerAgentID := createHandlerTestAgent(t, "Collaboration Loop Worker", nil)
+	var parentID, childID string
+	defer func() {
+		ctx := context.Background()
+		for _, issueID := range []string{childID, parentID} {
+			if issueID == "" {
+				continue
+			}
+			testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+			req := newRequest("DELETE", "/api/issues/"+issueID, nil)
+			req = withURLParam(req, "id", issueID)
+			testHandler.DeleteIssue(httptest.NewRecorder(), req)
+		}
+	}()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Orchestrator loop parent",
+		"status":        "todo",
+		"assignee_type": "agent",
+		"assignee_id":   pmAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue parent: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var parent IssueResponse
+	json.NewDecoder(w.Body).Decode(&parent)
+	parentID = parent.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           "Orchestrator loop worker issue",
+		"parent_issue_id": parentID,
+		"status":          "backlog",
+		"assignee_type":   "agent",
+		"assignee_id":     workerAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue child: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var child IssueResponse
+	json.NewDecoder(w.Body).Decode(&child)
+	childID = child.ID
+
+	var orchestratorTaskID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT id::text
+		FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, parentID, pmAgentID).Scan(&orchestratorTaskID); err != nil {
+		t.Fatalf("load orchestrator task: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE agent_task_queue
+		SET status = 'running', started_at = now()
+		WHERE id = $1
+	`, orchestratorTaskID); err != nil {
+		t.Fatalf("mark orchestrator task running: %v", err)
+	}
+
+	orchestratorOutput, _ := json.Marshal(map[string]any{
+		"brief": "worker can continue",
+		"assignments": []map[string]any{{
+			"issue_id": childID,
+			"agent_id": workerAgentID,
+			"role":     "worker",
+			"goal":     "continue from orchestrator assignment",
+			"context":  "use the shared workroom and leave a handoff",
+		}},
+		"dependencies": []string{},
+		"shared_notes": []string{"handoff-driven continuation"},
+		"next_steps":   []string{"worker task should be queued"},
+	})
+	result, _ := json.Marshal(map[string]any{
+		"task_id": orchestratorTaskID,
+		"output":  string(orchestratorOutput),
+	})
+	if _, err := testHandler.TaskService.CompleteTask(context.Background(), parseUUID(orchestratorTaskID), result, "", ""); err != nil {
+		t.Fatalf("complete orchestrator task: %v", err)
+	}
+
+	var workerTaskID, contextJSON string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT atq.id::text, atq.context::text
+		FROM agent_task_queue atq
+		JOIN collaboration_assignment ca ON ca.task_id = atq.id
+		WHERE atq.issue_id = $1 AND atq.agent_id = $2 AND atq.status = 'queued'
+		ORDER BY atq.created_at DESC
+		LIMIT 1
+	`, childID, workerAgentID).Scan(&workerTaskID, &contextJSON); err != nil {
+		t.Fatalf("load worker task from orchestrator assignment: %v", err)
+	}
+	if workerTaskID == "" {
+		t.Fatalf("expected worker task to be enqueued")
+	}
+	for _, want := range []string{"workroom_id", "assignment_id", "worker"} {
+		if !strings.Contains(contextJSON, want) {
+			t.Fatalf("worker task context missing %q: %s", want, contextJSON)
+		}
+	}
+}
+
 func setupHandlerTestFixture(ctx context.Context, pool *pgxpool.Pool) (string, string, error) {
 	if err := cleanupHandlerTestFixture(ctx, pool); err != nil {
 		return "", "", err
