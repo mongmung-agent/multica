@@ -37,6 +37,20 @@ WHERE workroom_id = $1 AND kind = $2
 ORDER BY created_at DESC
 LIMIT 1;
 
+-- name: UpsertCollaborationRepoMemory :one
+INSERT INTO collaboration_repo_memory (workroom_id, payload, updated_by_agent_id, updated_task_id)
+VALUES ($1, $2, sqlc.narg(updated_by_agent_id), sqlc.narg(updated_task_id))
+ON CONFLICT (workroom_id) DO UPDATE SET
+    payload = EXCLUDED.payload,
+    updated_by_agent_id = EXCLUDED.updated_by_agent_id,
+    updated_task_id = EXCLUDED.updated_task_id,
+    updated_at = now()
+RETURNING *;
+
+-- name: GetCollaborationRepoMemory :one
+SELECT * FROM collaboration_repo_memory
+WHERE workroom_id = $1;
+
 -- name: CreateCollaborationAssignment :one
 INSERT INTO collaboration_assignment (
     workroom_id, target_issue_id, agent_id, role, goal, context,

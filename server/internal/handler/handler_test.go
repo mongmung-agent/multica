@@ -326,6 +326,12 @@ func TestOrchestratorCompletionEnqueuesAssignmentTask(t *testing.T) {
 	if promptContext.AssignmentID != workerAssignmentID {
 		t.Fatalf("expected prompt assignment %s, got %s", workerAssignmentID, promptContext.AssignmentID)
 	}
+	if len(promptContext.RepoMemoryWiki) == 0 || !strings.Contains(string(promptContext.RepoMemoryWiki), "handoff-driven continuation") {
+		t.Fatalf("expected worker prompt context to include repo memory wiki, got %s", string(promptContext.RepoMemoryWiki))
+	}
+	if promptContext.Metrics["assignment_total"] == nil || promptContext.Metrics["synthesis_count"] == nil {
+		t.Fatalf("expected worker prompt context to include metrics, got %#v", promptContext.Metrics)
+	}
 
 	w = httptest.NewRecorder()
 	req = newRequest("GET", "/api/issues/"+parentID+"/collaboration", nil)
@@ -335,10 +341,115 @@ func TestOrchestratorCompletionEnqueuesAssignmentTask(t *testing.T) {
 		t.Fatalf("GetIssueCollaboration: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	for _, want := range []string{"assignments", "recent_handoffs", "previous handoff"} {
+	for _, want := range []string{"assignments", "recent_handoffs", "repo_memory_wiki", "metrics", "previous handoff", "handoff-driven continuation"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("collaboration API missing %q: %s", want, body)
 		}
+	}
+}
+
+func TestOrchestratorAssignmentFallsBackToIssueAgentAssignee(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	pmAgentID := createHandlerTestAgent(t, "Collaboration Fallback PM", nil)
+	workerAgentID := createHandlerTestAgent(t, "Collaboration Fallback Worker", nil)
+	var parentID, childID string
+	defer func() {
+		ctx := context.Background()
+		for _, issueID := range []string{childID, parentID} {
+			if issueID == "" {
+				continue
+			}
+			testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+			req := newRequest("DELETE", "/api/issues/"+issueID, nil)
+			req = withURLParam(req, "id", issueID)
+			testHandler.DeleteIssue(httptest.NewRecorder(), req)
+		}
+	}()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Fallback routing parent",
+		"status":        "todo",
+		"assignee_type": "agent",
+		"assignee_id":   pmAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue parent: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var parent IssueResponse
+	json.NewDecoder(w.Body).Decode(&parent)
+	parentID = parent.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           "Fallback worker target",
+		"parent_issue_id": parentID,
+		"status":          "backlog",
+		"assignee_type":   "agent",
+		"assignee_id":     workerAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue child: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var child IssueResponse
+	json.NewDecoder(w.Body).Decode(&child)
+	childID = child.ID
+
+	var orchestratorTaskID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT id::text
+		FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, parentID, pmAgentID).Scan(&orchestratorTaskID); err != nil {
+		t.Fatalf("load orchestrator task: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE agent_task_queue
+		SET status = 'running', started_at = now()
+		WHERE id = $1
+	`, orchestratorTaskID); err != nil {
+		t.Fatalf("mark orchestrator task running: %v", err)
+	}
+
+	orchestratorOutput, _ := json.Marshal(map[string]any{
+		"brief": "fallback assignment should route to target issue assignee",
+		"assignments": []map[string]any{{
+			"issue_id": childID,
+			"role":     "worker",
+			"goal":     "continue via issue assignee",
+		}},
+		"dependencies": []string{},
+		"shared_notes": []string{},
+		"next_steps":   []string{},
+	})
+	result, _ := json.Marshal(map[string]any{
+		"task_id": orchestratorTaskID,
+		"output":  string(orchestratorOutput),
+	})
+	if _, err := testHandler.TaskService.CompleteTask(context.Background(), parseUUID(orchestratorTaskID), result, "", ""); err != nil {
+		t.Fatalf("complete orchestrator task: %v", err)
+	}
+
+	var routedAgentID, goal string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT ca.agent_id::text, ca.goal
+		FROM collaboration_assignment ca
+		JOIN agent_task_queue atq ON atq.id = ca.task_id
+		WHERE atq.issue_id = $1 AND ca.goal = 'continue via issue assignee'
+		ORDER BY ca.created_at DESC
+		LIMIT 1
+	`, childID).Scan(&routedAgentID, &goal); err != nil {
+		t.Fatalf("load routed fallback assignment: %v", err)
+	}
+	if routedAgentID != workerAgentID || goal != "continue via issue assignee" {
+		t.Fatalf("expected fallback to issue assignee %s, got agent=%s goal=%s", workerAgentID, routedAgentID, goal)
 	}
 }
 
@@ -436,6 +547,133 @@ func TestOrchestratorInvalidAssignmentRaisesQuestionWithoutTask(t *testing.T) {
 	}
 	if !strings.Contains(questionPayload, "missing valid issue_id") {
 		t.Fatalf("question event did not explain invalid assignment: %s", questionPayload)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("GET", "/api/issues/"+parentID+"/collaboration", nil)
+	req = withURLParam(req, "id", parentID)
+	testHandler.GetIssueCollaboration(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetIssueCollaboration: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"invalid_assignment_count":1`) {
+		t.Fatalf("expected invalid assignment metric in collaboration API: %s", w.Body.String())
+	}
+}
+
+func TestOrchestratorRoutingFailureRaisesQuestionWithoutTask(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	pmAgentID := createHandlerTestAgent(t, "Collaboration Routing PM", nil)
+	var parentID, childID string
+	defer func() {
+		ctx := context.Background()
+		for _, issueID := range []string{childID, parentID} {
+			if issueID == "" {
+				continue
+			}
+			testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+			req := newRequest("DELETE", "/api/issues/"+issueID, nil)
+			req = withURLParam(req, "id", issueID)
+			testHandler.DeleteIssue(httptest.NewRecorder(), req)
+		}
+	}()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Routing failure parent",
+		"status":        "todo",
+		"assignee_type": "agent",
+		"assignee_id":   pmAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue parent: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var parent IssueResponse
+	json.NewDecoder(w.Body).Decode(&parent)
+	parentID = parent.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           "Routing failure target",
+		"parent_issue_id": parentID,
+		"status":          "backlog",
+		"assignee_type":   "member",
+		"assignee_id":     testUserID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue child: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var child IssueResponse
+	json.NewDecoder(w.Body).Decode(&child)
+	childID = child.ID
+
+	var orchestratorTaskID, workroomID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT atq.id::text, ca.workroom_id::text
+		FROM agent_task_queue atq
+		JOIN collaboration_assignment ca ON ca.task_id = atq.id
+		WHERE atq.issue_id = $1 AND atq.agent_id = $2
+		ORDER BY atq.created_at DESC
+		LIMIT 1
+	`, parentID, pmAgentID).Scan(&orchestratorTaskID, &workroomID); err != nil {
+		t.Fatalf("load orchestrator task: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE agent_task_queue
+		SET status = 'running', started_at = now()
+		WHERE id = $1
+	`, orchestratorTaskID); err != nil {
+		t.Fatalf("mark orchestrator task running: %v", err)
+	}
+
+	orchestratorOutput, _ := json.Marshal(map[string]any{
+		"brief": "routing failure should be visible",
+		"assignments": []map[string]any{{
+			"issue_id": childID,
+			"role":     "worker",
+			"goal":     "cannot route without agent",
+		}},
+		"dependencies": []string{},
+		"shared_notes": []string{},
+		"next_steps":   []string{},
+	})
+	result, _ := json.Marshal(map[string]any{
+		"task_id": orchestratorTaskID,
+		"output":  string(orchestratorOutput),
+	})
+	if _, err := testHandler.TaskService.CompleteTask(context.Background(), parseUUID(orchestratorTaskID), result, "", ""); err != nil {
+		t.Fatalf("complete orchestrator task: %v", err)
+	}
+
+	var unexpectedTaskCount int
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM agent_task_queue
+		WHERE issue_id = $1
+	`, childID).Scan(&unexpectedTaskCount); err != nil {
+		t.Fatalf("count routed tasks: %v", err)
+	}
+	if unexpectedTaskCount != 0 {
+		t.Fatalf("expected no worker task from routing failure, got %d", unexpectedTaskCount)
+	}
+
+	var questionPayload string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT payload::text
+		FROM collaboration_event
+		WHERE workroom_id = $1 AND event_type = 'question_raised'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, workroomID).Scan(&questionPayload); err != nil {
+		t.Fatalf("load question event: %v", err)
+	}
+	if !strings.Contains(questionPayload, "no runnable agent") {
+		t.Fatalf("question event did not explain routing failure: %s", questionPayload)
 	}
 }
 

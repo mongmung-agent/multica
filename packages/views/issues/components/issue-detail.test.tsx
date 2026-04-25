@@ -176,6 +176,7 @@ const mockApiObj = vi.hoisted(() => ({
   getActiveTasksForIssue: vi.fn().mockResolvedValue({ tasks: [] }),
   listTasksByIssue: vi.fn().mockResolvedValue([]),
   listTaskMessages: vi.fn().mockResolvedValue([]),
+  getIssueCollaboration: vi.fn().mockResolvedValue({ collaboration: null }),
   listChildIssues: vi.fn().mockResolvedValue({ issues: [] }),
   listIssues: vi.fn().mockResolvedValue({ issues: [], total: 0 }),
   uploadFile: vi.fn(),
@@ -373,6 +374,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssues.mockResolvedValue({ issues: [], total: 0 });
     mockApiObj.getActiveTasksForIssue.mockResolvedValue({ tasks: [] });
     mockApiObj.listTasksByIssue.mockResolvedValue([]);
+    mockApiObj.getIssueCollaboration.mockResolvedValue({ collaboration: null });
     mockApiObj.listMembers.mockResolvedValue([
       { user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" },
     ]);
@@ -473,6 +475,68 @@ describe("IssueDetail (shared)", () => {
     await waitFor(() => {
       expect(screen.getAllByText("Activity").length).toBeGreaterThanOrEqual(1);
     });
+  });
+
+  it("renders collaboration timeline data", async () => {
+    mockApiObj.getIssueCollaboration.mockResolvedValue({
+      collaboration: {
+        workroom_id: "workroom-1",
+        task_brief: { current_summary: "Shared collaboration workroom" },
+        metrics: {
+          assignment_total: 2,
+          assignment_running: 1,
+          assignment_handoff_submitted: 1,
+          assignment_cancelled: 0,
+          handoff_count: 1,
+          synthesis_count: 1,
+          invalid_assignment_count: 1,
+          enqueue_failure_count: 0,
+          missing_handoff_count: 0,
+          continuation_rate: 0.5,
+        },
+        assignments: [
+          {
+            id: "assignment-1",
+            workroom_id: "workroom-1",
+            target_issue_id: "issue-1",
+            task_id: "task-1",
+            agent_id: "agent-1",
+            role: "worker",
+            goal: "Implement API handoff",
+            context: "Use shared memory",
+            owned_scope: ["server"],
+            inputs: [],
+            expected_handoff: [],
+            status: "running",
+          },
+        ],
+        recent_handoffs: [
+          {
+            id: "handoff-1",
+            summary: "Worker finished routing policy",
+            validation: ["go test ./internal/service"],
+          },
+        ],
+        repo_memory_wiki: {
+          worked_on: ["routing policy"],
+          validation: ["go test ./internal/service"],
+          remaining_work: ["frontend review"],
+        },
+        events: [{ event_type: "question_raised", reason: "missing runnable agent" }],
+      },
+    });
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(screen.getByText("Collaboration")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Shared collaboration workroom")).toBeInTheDocument();
+    expect(screen.getByText("Implement API handoff")).toBeInTheDocument();
+    expect(screen.getByText("Worker finished routing policy")).toBeInTheDocument();
+    expect(screen.getByText("routing policy")).toBeInTheDocument();
+    expect(screen.getByText("missing runnable agent")).toBeInTheDocument();
   });
 
   it("renders comments from timeline", async () => {

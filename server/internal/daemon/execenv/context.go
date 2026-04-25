@@ -176,6 +176,12 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 		if len(ctx.Collaboration.RepoMemory) > 0 {
 			writeRawJSONBlock(&b, "Repo Memory", ctx.Collaboration.RepoMemory)
 		}
+		if len(ctx.Collaboration.RepoMemoryWiki) > 0 {
+			writeRawJSONBlock(&b, "Repo Memory Wiki", ctx.Collaboration.RepoMemoryWiki)
+		}
+		if len(ctx.Collaboration.Metrics) > 0 {
+			writeJSONBlock(&b, "Collaboration Reliability Metrics", ctx.Collaboration.Metrics)
+		}
 		if len(ctx.Collaboration.Assignment) > 0 {
 			writeJSONBlock(&b, "Current Assignment", ctx.Collaboration.Assignment)
 		}

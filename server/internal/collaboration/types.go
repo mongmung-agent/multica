@@ -75,6 +75,8 @@ type PromptContext struct {
 	TaskBrief      map[string]any    `json:"task_brief,omitempty"`
 	TicketMemory   json.RawMessage   `json:"ticket_memory,omitempty"`
 	RepoMemory     json.RawMessage   `json:"repo_memory,omitempty"`
+	RepoMemoryWiki json.RawMessage   `json:"repo_memory_wiki,omitempty"`
+	Metrics        map[string]any    `json:"metrics,omitempty"`
 	Assignment     map[string]any    `json:"assignment,omitempty"`
 	Assignments    []map[string]any  `json:"assignments,omitempty"`
 	RecentHandoffs []json.RawMessage `json:"recent_handoffs,omitempty"`

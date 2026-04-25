@@ -83,6 +83,12 @@ func writeCollaborationPromptContext(b *strings.Builder, task Task) {
 	if len(task.Collaboration.RepoMemory) > 0 {
 		writePromptJSON(b, "Repo memory snapshot", json.RawMessage(task.Collaboration.RepoMemory))
 	}
+	if len(task.Collaboration.RepoMemoryWiki) > 0 {
+		writePromptJSON(b, "Repo memory wiki", json.RawMessage(task.Collaboration.RepoMemoryWiki))
+	}
+	if len(task.Collaboration.Metrics) > 0 {
+		writePromptJSON(b, "Collaboration reliability metrics", task.Collaboration.Metrics)
+	}
 	if len(task.Collaboration.RecentHandoffs) > 0 {
 		writePromptJSON(b, "Prior handoffs", task.Collaboration.RecentHandoffs)
 	}

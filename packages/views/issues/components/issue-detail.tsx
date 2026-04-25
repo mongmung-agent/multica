@@ -34,7 +34,7 @@ import { Checkbox } from "@multica/ui/components/ui/checkbox";
 import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@multica/ui/components/ui/command";
 import { AvatarGroup, AvatarGroupCount } from "@multica/ui/components/ui/avatar";
 import { ActorAvatar } from "../../common/actor-avatar";
-import type { IssueStatus, IssuePriority, TimelineEntry } from "@multica/core/types";
+import type { CollaborationContext, IssueStatus, IssuePriority, TimelineEntry } from "@multica/core/types";
 import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multica/core/issues/config";
 import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, DueDatePicker, AssigneePicker } from ".";
 import { IssueActionsDropdown, useIssueActions } from "../actions";
@@ -47,7 +47,7 @@ import { useAuthStore } from "@multica/core/auth";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions } from "@multica/core/issues/queries";
+import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions, issueCollaborationOptions } from "@multica/core/issues/queries";
 import { memberListOptions, agentListOptions } from "@multica/core/workspace/queries";
 import { useRecentIssuesStore } from "@multica/core/issues/stores";
 import { useIssueTimeline } from "../hooks/use-issue-timeline";
@@ -127,6 +127,154 @@ function formatTokenCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+function collaborationEventLabel(event: Record<string, unknown>): string {
+  const eventType = String(event.event_type ?? event.type ?? event.source ?? "event");
+  return eventType.replaceAll("_", " ");
+}
+
+function collaborationMetric(value: unknown): string {
+  if (typeof value !== "number") return "0";
+  if (value > 0 && value < 1) return `${Math.round(value * 100)}%`;
+  return String(value);
+}
+
+function collaborationList(items: unknown): string[] {
+  return Array.isArray(items) ? items.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+}
+
+function CollaborationPanel({ collaboration }: { collaboration: CollaborationContext | null | undefined }) {
+  if (!collaboration?.workroom_id) {
+    return (
+      <section className="mt-8 border-t pt-6" aria-label="Collaboration">
+        <h2 className="text-base font-semibold">Collaboration</h2>
+        <p className="mt-2 text-sm text-muted-foreground">No collaboration workroom yet.</p>
+      </section>
+    );
+  }
+
+  const assignments = collaboration.assignments ?? [];
+  const handoffs = collaboration.recent_handoffs ?? [];
+  const events = collaboration.events ?? [];
+  const repoMemory = collaboration.repo_memory_wiki;
+  const metrics = collaboration.metrics;
+  const currentSummary = collaboration.task_brief?.current_summary;
+  const metricItems: [string, unknown][] = metrics
+    ? [
+        ["Assignments", metrics.assignment_total],
+        ["Running", metrics.assignment_running],
+        ["Handoffs", metrics.handoff_count],
+        ["Synthesis", metrics.synthesis_count],
+        ["Invalid", metrics.invalid_assignment_count],
+        ["Enqueue failures", metrics.enqueue_failure_count],
+        ["Continuation", metrics.continuation_rate],
+      ]
+    : [];
+
+  return (
+    <section className="mt-8 border-t pt-6" aria-label="Collaboration">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-base font-semibold">Collaboration</h2>
+        <span className="truncate text-xs text-muted-foreground">{collaboration.workroom_id}</span>
+      </div>
+
+      {currentSummary != null && (
+        <p className="mt-2 text-sm text-muted-foreground">{String(currentSummary)}</p>
+      )}
+
+      {metricItems.length > 0 && (
+        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+          {metricItems.map(([label, value]) => (
+            <div key={label} className="rounded-md border bg-card/30 px-2.5 py-2">
+              <div className="text-[11px] text-muted-foreground">{label}</div>
+              <div className="mt-1 text-sm font-medium tabular-nums">{collaborationMetric(value)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-5 grid gap-5 lg:grid-cols-2">
+        <div>
+          <h3 className="text-sm font-medium">Assignments</h3>
+          <div className="mt-2 divide-y rounded-md border bg-card/30">
+            {assignments.length === 0 ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">No assignments recorded.</p>
+            ) : assignments.map((assignment) => (
+              <div key={assignment.id} className="px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-sm font-medium">{assignment.goal}</span>
+                  <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                    {assignment.status}
+                  </span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                  <span>{assignment.role}</span>
+                  <span>{assignment.agent_id}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-sm font-medium">Handoffs</h3>
+          <div className="mt-2 divide-y rounded-md border bg-card/30">
+            {handoffs.length === 0 ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">No handoff submitted.</p>
+            ) : handoffs.slice(0, 5).map((handoff, index) => (
+              <div key={String(handoff.id ?? index)} className="px-3 py-2">
+                <p className="text-sm">{String(handoff.summary ?? "Worker handoff")}</p>
+                {collaborationList(handoff.validation).length > 0 && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {collaborationList(handoff.validation).join(" / ")}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {repoMemory && (
+        <div className="mt-5">
+          <h3 className="text-sm font-medium">Repo memory</h3>
+          <div className="mt-2 grid gap-3 rounded-md border bg-card/30 p-3 sm:grid-cols-2">
+            {([
+              ["Worked on", repoMemory.worked_on],
+              ["Evidence", repoMemory.evidence],
+              ["Validation", repoMemory.validation],
+              ["Remaining", repoMemory.remaining_work],
+              ["Shared notes", repoMemory.shared_notes],
+              ["Next steps", repoMemory.next_steps],
+            ] satisfies [string, unknown][]).map(([label, items]) => {
+              const values = collaborationList(items);
+              return (
+                <div key={label} className="min-w-0">
+                  <div className="text-[11px] font-medium text-muted-foreground">{label}</div>
+                  <p className="mt-1 truncate text-sm">{values.length > 0 ? values.join(" / ") : "-"}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-5">
+        <h3 className="text-sm font-medium">Timeline</h3>
+        <div className="mt-2 divide-y rounded-md border bg-card/30">
+          {events.length === 0 ? (
+            <p className="px-3 py-2 text-sm text-muted-foreground">No collaboration events recorded.</p>
+          ) : events.slice(0, 8).map((event, index) => (
+            <div key={String(event.id ?? index)} className="px-3 py-2">
+              <div className="text-sm font-medium capitalize">{collaborationEventLabel(event)}</div>
+              {event.reason != null && <p className="mt-1 text-xs text-muted-foreground">{String(event.reason)}</p>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +411,10 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
 
   // Token usage
   const { data: usage } = useQuery(issueUsageOptions(id));
+  const { data: collaborationData } = useQuery({
+    ...issueCollaborationOptions(id),
+    enabled: !!issue,
+  });
 
   // Sub-issue queries
   const parentIssueId = issue?.parent_issue_id;
@@ -761,6 +913,8 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
               </div>
             );
           })()}
+
+          <CollaborationPanel collaboration={collaborationData?.collaboration} />
 
           <div className="my-8 border-t" />
 

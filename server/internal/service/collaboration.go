@@ -127,10 +127,12 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 			TaskID:       task.ID,
 			Payload:      raw,
 		})
+		s.updateRepoMemoryFromHandoff(ctx, workroomID, task.AgentID, task.ID, handoff)
 		return nil, nil
 	}
 
 	orchestratorOutput, raw := parseOrchestratorOutput(payload.Output)
+	s.updateRepoMemoryFromSynthesis(ctx, workroomID, task.AgentID, task.ID, orchestratorOutput)
 	var createdAssignments []db.CollaborationAssignment
 	eventType := collab.EventBriefCreated
 	if handoffs, err := s.Queries.ListCollaborationHandoffs(ctx, workroomID); err == nil && len(handoffs) > 0 {
@@ -145,22 +147,13 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 	})
 	for _, spec := range orchestratorOutput.Assignments {
 		if reason := invalidAssignmentReason(spec); reason != "" {
-			_, _ = s.Queries.CreateCollaborationEvent(ctx, db.CreateCollaborationEventParams{
-				WorkroomID:   workroomID,
-				EventType:    collab.EventQuestionRaised,
-				ActorAgentID: task.AgentID,
-				TaskID:       task.ID,
-				Payload: mustJSON(map[string]any{
-					"reason":     reason,
-					"assignment": spec,
-					"source":     "orchestrator_output",
-				}),
-			})
+			s.recordAssignmentQuestion(ctx, workroomID, task.AgentID, task.ID, reason, spec, "orchestrator_output")
 			continue
 		}
 		assignment, err := s.createAssignmentFromSpec(ctx, workroomID, spec)
 		if err != nil {
-			return createdAssignments, err
+			s.recordAssignmentQuestion(ctx, workroomID, task.AgentID, task.ID, err.Error(), spec, "routing_policy")
+			continue
 		}
 		createdAssignments = append(createdAssignments, assignment)
 	}
@@ -245,6 +238,10 @@ func (s *CollaborationService) PromptContext(ctx context.Context, task db.AgentT
 			pc.RepoMemory = json.RawMessage(snapshot.Payload)
 		}
 	}
+	if repoMemory, err := s.Queries.GetCollaborationRepoMemory(ctx, workroomID); err == nil {
+		pc.RepoMemoryWiki = json.RawMessage(repoMemory.Payload)
+	}
+	pc.Metrics = s.collaborationMetrics(ctx, workroomID)
 	if taskContext.AssignmentID != "" {
 		if assignment, err := s.Queries.GetCollaborationAssignment(ctx, util.ParseUUID(taskContext.AssignmentID)); err == nil {
 			pc.Assignment = assignmentPayload(assignment)
@@ -260,7 +257,7 @@ func (s *CollaborationService) PromptContext(ctx context.Context, task db.AgentT
 	}
 	events, _ := s.Queries.ListCollaborationEvents(ctx, workroomID)
 	for _, event := range events {
-		pc.Events = append(pc.Events, json.RawMessage(event.Payload))
+		pc.Events = append(pc.Events, eventPayload(event))
 	}
 	return pc, nil
 }
@@ -293,6 +290,10 @@ func (s *CollaborationService) WorkroomSnapshot(ctx context.Context, issueID pgt
 	}); err == nil {
 		pc.RepoMemory = json.RawMessage(snapshot.Payload)
 	}
+	if repoMemory, err := s.Queries.GetCollaborationRepoMemory(ctx, workroom.ID); err == nil {
+		pc.RepoMemoryWiki = json.RawMessage(repoMemory.Payload)
+	}
+	pc.Metrics = s.collaborationMetrics(ctx, workroom.ID)
 	assignments, _ := s.Queries.ListCollaborationAssignments(ctx, workroom.ID)
 	for _, assignment := range assignments {
 		pc.Assignments = append(pc.Assignments, assignmentPayload(assignment))
@@ -303,7 +304,7 @@ func (s *CollaborationService) WorkroomSnapshot(ctx context.Context, issueID pgt
 	}
 	events, _ := s.Queries.ListCollaborationEvents(ctx, workroom.ID)
 	for _, event := range events {
-		pc.Events = append(pc.Events, json.RawMessage(event.Payload))
+		pc.Events = append(pc.Events, eventPayload(event))
 	}
 	return pc, nil
 }
@@ -435,6 +436,14 @@ func (s *CollaborationService) createAssignment(ctx context.Context, workroom db
 
 func (s *CollaborationService) createAssignmentFromSpec(ctx context.Context, workroomID pgtype.UUID, spec collab.AssignmentSpec) (db.CollaborationAssignment, error) {
 	targetIssueID := util.ParseUUID(spec.IssueID)
+	targetIssue, err := s.Queries.GetIssue(ctx, targetIssueID)
+	if err != nil {
+		return db.CollaborationAssignment{}, fmt.Errorf("load assignment target issue: %w", err)
+	}
+	agentID, err := s.resolveAssignmentAgent(ctx, spec, targetIssue)
+	if err != nil {
+		return db.CollaborationAssignment{}, err
+	}
 	role := spec.Role
 	contextText := spec.Context
 	if strings.TrimSpace(contextText) == "" {
@@ -447,7 +456,7 @@ func (s *CollaborationService) createAssignmentFromSpec(ctx context.Context, wor
 	assignment, err := s.Queries.CreateCollaborationAssignment(ctx, db.CreateCollaborationAssignmentParams{
 		WorkroomID:      workroomID,
 		TargetIssueID:   targetIssueID,
-		AgentID:         util.ParseUUID(spec.AgentID),
+		AgentID:         agentID,
 		Role:            role,
 		Goal:            strings.TrimSpace(spec.Goal),
 		Context:         contextText,
@@ -461,23 +470,57 @@ func (s *CollaborationService) createAssignmentFromSpec(ctx context.Context, wor
 	_, _ = s.Queries.CreateCollaborationEvent(ctx, db.CreateCollaborationEventParams{
 		WorkroomID:   workroomID,
 		EventType:    collab.EventAssignmentCreated,
-		ActorAgentID: util.ParseUUID(spec.AgentID),
+		ActorAgentID: agentID,
 		Payload: mustJSON(map[string]any{
 			"assignment_id": util.UUIDToString(assignment.ID),
 			"role":          role,
 			"goal":          assignment.Goal,
 			"source":        "orchestrator_output",
+			"routing":       assignmentRoutingPayload(spec, targetIssue, agentID),
 		}),
 	})
 	return assignment, nil
 }
 
+func (s *CollaborationService) resolveAssignmentAgent(ctx context.Context, spec collab.AssignmentSpec, targetIssue db.Issue) (pgtype.UUID, error) {
+	agentID := util.ParseUUID(spec.AgentID)
+	source := "assignment.agent_id"
+	if !agentID.Valid {
+		if targetIssue.AssigneeType.Valid && targetIssue.AssigneeType.String == "agent" && targetIssue.AssigneeID.Valid {
+			agentID = targetIssue.AssigneeID
+			source = "target_issue.assignee"
+		} else {
+			return pgtype.UUID{}, fmt.Errorf("routing failed: no runnable agent; assignment has no agent_id and target issue has no agent assignee")
+		}
+	}
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		return pgtype.UUID{}, fmt.Errorf("routing failed: load agent from %s: %w", source, err)
+	}
+	if agent.ArchivedAt.Valid {
+		return pgtype.UUID{}, fmt.Errorf("routing failed: agent from %s is archived", source)
+	}
+	if !agent.RuntimeID.Valid {
+		return pgtype.UUID{}, fmt.Errorf("routing failed: agent from %s has no runtime", source)
+	}
+	return agentID, nil
+}
+
+func assignmentRoutingPayload(spec collab.AssignmentSpec, targetIssue db.Issue, agentID pgtype.UUID) map[string]any {
+	source := "assignment.agent_id"
+	if strings.TrimSpace(spec.AgentID) == "" {
+		source = "target_issue.assignee"
+	}
+	return map[string]any{
+		"source":          source,
+		"agent_id":        util.UUIDToString(agentID),
+		"target_issue_id": util.UUIDToString(targetIssue.ID),
+	}
+}
+
 func invalidAssignmentReason(spec collab.AssignmentSpec) string {
 	if !util.ParseUUID(spec.IssueID).Valid {
 		return "assignment missing valid issue_id"
-	}
-	if !util.ParseUUID(spec.AgentID).Valid {
-		return "assignment missing valid agent_id"
 	}
 	if spec.Role != collab.RoleWorker && spec.Role != collab.RoleOrchestrator {
 		return "assignment role must be worker or orchestrator"
@@ -486,6 +529,20 @@ func invalidAssignmentReason(spec collab.AssignmentSpec) string {
 		return "assignment missing goal"
 	}
 	return ""
+}
+
+func (s *CollaborationService) recordAssignmentQuestion(ctx context.Context, workroomID, actorAgentID, taskID pgtype.UUID, reason string, spec collab.AssignmentSpec, source string) {
+	_, _ = s.Queries.CreateCollaborationEvent(ctx, db.CreateCollaborationEventParams{
+		WorkroomID:   workroomID,
+		EventType:    collab.EventQuestionRaised,
+		ActorAgentID: actorAgentID,
+		TaskID:       taskID,
+		Payload: mustJSON(map[string]any{
+			"reason":     reason,
+			"assignment": spec,
+			"source":     source,
+		}),
+	})
 }
 
 func parseHandoffPayload(output string) (collab.HandoffPayload, []byte) {
@@ -575,6 +632,169 @@ func assignmentPayload(assignment db.CollaborationAssignment) map[string]any {
 		"expected_handoff": json.RawMessage(assignment.ExpectedHandoff),
 		"status":           assignment.Status,
 	}
+}
+
+func eventPayload(event db.CollaborationEvent) json.RawMessage {
+	payload := map[string]any{}
+	_ = json.Unmarshal(event.Payload, &payload)
+	payload["id"] = util.UUIDToString(event.ID)
+	payload["event_type"] = event.EventType
+	payload["created_at"] = event.CreatedAt.Time
+	if event.ActorAgentID.Valid {
+		payload["actor_agent_id"] = util.UUIDToString(event.ActorAgentID)
+	}
+	if event.TaskID.Valid {
+		payload["task_id"] = util.UUIDToString(event.TaskID)
+	}
+	return mustJSON(payload)
+}
+
+func (s *CollaborationService) updateRepoMemoryFromHandoff(ctx context.Context, workroomID, agentID, taskID pgtype.UUID, handoff collab.HandoffPayload) {
+	memory := s.loadRepoMemoryWiki(ctx, workroomID)
+	appendStrings(memory, "worked_on", handoff.WorkedOn)
+	appendStrings(memory, "evidence", handoff.Evidence)
+	appendStrings(memory, "validation", handoff.Validation)
+	appendStrings(memory, "remaining_work", handoff.RemainingWork)
+	appendStrings(memory, "handoff_notes", handoff.HandoffNotes)
+	memory["last_update_source"] = "worker_handoff"
+	memory["last_updated_by_agent_id"] = util.UUIDToString(agentID)
+	memory["last_updated_task_id"] = util.UUIDToString(taskID)
+	_, _ = s.Queries.UpsertCollaborationRepoMemory(ctx, db.UpsertCollaborationRepoMemoryParams{
+		WorkroomID:       workroomID,
+		Payload:          mustJSON(memory),
+		UpdatedByAgentID: agentID,
+		UpdatedTaskID:    taskID,
+	})
+}
+
+func (s *CollaborationService) updateRepoMemoryFromSynthesis(ctx context.Context, workroomID, agentID, taskID pgtype.UUID, output collab.OrchestratorOutput) {
+	memory := s.loadRepoMemoryWiki(ctx, workroomID)
+	appendStrings(memory, "synthesis_briefs", []string{output.Brief})
+	appendStrings(memory, "dependencies", output.Dependencies)
+	appendStrings(memory, "shared_notes", output.SharedNotes)
+	appendStrings(memory, "next_steps", output.NextSteps)
+	memory["last_update_source"] = "orchestrator_synthesis"
+	memory["last_updated_by_agent_id"] = util.UUIDToString(agentID)
+	memory["last_updated_task_id"] = util.UUIDToString(taskID)
+	_, _ = s.Queries.UpsertCollaborationRepoMemory(ctx, db.UpsertCollaborationRepoMemoryParams{
+		WorkroomID:       workroomID,
+		Payload:          mustJSON(memory),
+		UpdatedByAgentID: agentID,
+		UpdatedTaskID:    taskID,
+	})
+}
+
+func (s *CollaborationService) loadRepoMemoryWiki(ctx context.Context, workroomID pgtype.UUID) map[string]any {
+	base := map[string]any{
+		"worked_on":        []string{},
+		"evidence":         []string{},
+		"validation":       []string{},
+		"remaining_work":   []string{},
+		"handoff_notes":    []string{},
+		"synthesis_briefs": []string{},
+		"dependencies":     []string{},
+		"shared_notes":     []string{},
+		"next_steps":       []string{},
+	}
+	row, err := s.Queries.GetCollaborationRepoMemory(ctx, workroomID)
+	if err != nil {
+		return base
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(row.Payload, &decoded); err != nil {
+		return base
+	}
+	for key, value := range decoded {
+		base[key] = value
+	}
+	return base
+}
+
+func appendStrings(memory map[string]any, key string, values []string) {
+	existing := stringSlice(memory[key])
+	seen := make(map[string]bool, len(existing)+len(values))
+	for _, value := range existing {
+		seen[value] = true
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		existing = append(existing, value)
+		seen[value] = true
+	}
+	if len(existing) > 50 {
+		existing = existing[len(existing)-50:]
+	}
+	memory[key] = existing
+}
+
+func stringSlice(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string{}, typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return []string{}
+	}
+}
+
+func (s *CollaborationService) collaborationMetrics(ctx context.Context, workroomID pgtype.UUID) map[string]any {
+	assignments, _ := s.Queries.ListCollaborationAssignments(ctx, workroomID)
+	handoffs, _ := s.Queries.ListCollaborationHandoffs(ctx, workroomID)
+	events, _ := s.Queries.ListCollaborationEvents(ctx, workroomID)
+	metrics := map[string]any{
+		"assignment_total":             len(assignments),
+		"assignment_running":           0,
+		"assignment_handoff_submitted": 0,
+		"assignment_cancelled":         0,
+		"handoff_count":                len(handoffs),
+		"synthesis_count":              0,
+		"invalid_assignment_count":     0,
+		"enqueue_failure_count":        0,
+		"missing_handoff_count":        0,
+		"continuation_rate":            0.0,
+	}
+	for _, assignment := range assignments {
+		switch assignment.Status {
+		case "running":
+			metrics["assignment_running"] = metrics["assignment_running"].(int) + 1
+			if assignment.Role == collab.RoleWorker {
+				metrics["missing_handoff_count"] = metrics["missing_handoff_count"].(int) + 1
+			}
+		case "handoff_submitted":
+			metrics["assignment_handoff_submitted"] = metrics["assignment_handoff_submitted"].(int) + 1
+		case "cancelled":
+			metrics["assignment_cancelled"] = metrics["assignment_cancelled"].(int) + 1
+		}
+	}
+	for _, event := range events {
+		switch event.EventType {
+		case collab.EventOrchestratorSynthesisAdded:
+			metrics["synthesis_count"] = metrics["synthesis_count"].(int) + 1
+		case collab.EventQuestionRaised:
+			var payload map[string]any
+			_ = json.Unmarshal(event.Payload, &payload)
+			source, _ := payload["source"].(string)
+			if source == "assignment_enqueue" {
+				metrics["enqueue_failure_count"] = metrics["enqueue_failure_count"].(int) + 1
+			} else {
+				metrics["invalid_assignment_count"] = metrics["invalid_assignment_count"].(int) + 1
+			}
+		}
+	}
+	if len(assignments) > 0 {
+		metrics["continuation_rate"] = float64(len(handoffs)) / float64(len(assignments))
+	}
+	return metrics
 }
 
 func mustJSON(value any) []byte {

@@ -242,6 +242,25 @@ func (q *Queries) GetCollaborationAssignmentByTask(ctx context.Context, taskID p
 	return i, err
 }
 
+const getCollaborationRepoMemory = `-- name: GetCollaborationRepoMemory :one
+SELECT workroom_id, payload, updated_by_agent_id, updated_task_id, created_at, updated_at FROM collaboration_repo_memory
+WHERE workroom_id = $1
+`
+
+func (q *Queries) GetCollaborationRepoMemory(ctx context.Context, workroomID pgtype.UUID) (CollaborationRepoMemory, error) {
+	row := q.db.QueryRow(ctx, getCollaborationRepoMemory, workroomID)
+	var i CollaborationRepoMemory
+	err := row.Scan(
+		&i.WorkroomID,
+		&i.Payload,
+		&i.UpdatedByAgentID,
+		&i.UpdatedTaskID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getCollaborationWorkroom = `-- name: GetCollaborationWorkroom :one
 SELECT id, workspace_id, issue_id, goal, current_summary, created_at, updated_at FROM collaboration_workroom
 WHERE id = $1
@@ -542,6 +561,43 @@ func (q *Queries) SetCollaborationAssignmentTask(ctx context.Context, arg SetCol
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TargetIssueID,
+	)
+	return i, err
+}
+
+const upsertCollaborationRepoMemory = `-- name: UpsertCollaborationRepoMemory :one
+INSERT INTO collaboration_repo_memory (workroom_id, payload, updated_by_agent_id, updated_task_id)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (workroom_id) DO UPDATE SET
+    payload = EXCLUDED.payload,
+    updated_by_agent_id = EXCLUDED.updated_by_agent_id,
+    updated_task_id = EXCLUDED.updated_task_id,
+    updated_at = now()
+RETURNING workroom_id, payload, updated_by_agent_id, updated_task_id, created_at, updated_at
+`
+
+type UpsertCollaborationRepoMemoryParams struct {
+	WorkroomID       pgtype.UUID `json:"workroom_id"`
+	Payload          []byte      `json:"payload"`
+	UpdatedByAgentID pgtype.UUID `json:"updated_by_agent_id"`
+	UpdatedTaskID    pgtype.UUID `json:"updated_task_id"`
+}
+
+func (q *Queries) UpsertCollaborationRepoMemory(ctx context.Context, arg UpsertCollaborationRepoMemoryParams) (CollaborationRepoMemory, error) {
+	row := q.db.QueryRow(ctx, upsertCollaborationRepoMemory,
+		arg.WorkroomID,
+		arg.Payload,
+		arg.UpdatedByAgentID,
+		arg.UpdatedTaskID,
+	)
+	var i CollaborationRepoMemory
+	err := row.Scan(
+		&i.WorkroomID,
+		&i.Payload,
+		&i.UpdatedByAgentID,
+		&i.UpdatedTaskID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

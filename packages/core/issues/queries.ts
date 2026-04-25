@@ -22,6 +22,8 @@ export const issueKeys = {
   subscribers: (issueId: string) =>
     ["issues", "subscribers", issueId] as const,
   usage: (issueId: string) => ["issues", "usage", issueId] as const,
+  collaboration: (issueId: string) =>
+    ["issues", "collaboration", issueId] as const,
 };
 
 export type MyIssuesFilter = Pick<
@@ -148,5 +150,12 @@ export function issueUsageOptions(issueId: string) {
   return queryOptions({
     queryKey: issueKeys.usage(issueId),
     queryFn: () => api.getIssueUsage(issueId),
+  });
+}
+
+export function issueCollaborationOptions(issueId: string) {
+  return queryOptions({
+    queryKey: issueKeys.collaboration(issueId),
+    queryFn: () => api.getIssueCollaboration(issueId),
   });
 }

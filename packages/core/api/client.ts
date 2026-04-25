@@ -66,6 +66,7 @@ import type {
   ListAutopilotsResponse,
   GetAutopilotResponse,
   ListAutopilotRunsResponse,
+  IssueCollaborationResponse,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -385,6 +386,10 @@ export class ApiClient {
 
   async getIssue(id: string): Promise<Issue> {
     return this.fetch(`/api/issues/${id}`);
+  }
+
+  async getIssueCollaboration(id: string): Promise<IssueCollaborationResponse> {
+    return this.fetch(`/api/issues/${id}/collaboration`);
   }
 
   async createIssue(data: CreateIssueRequest): Promise<Issue> {

@@ -227,6 +227,15 @@ type CollaborationMemorySnapshot struct {
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
+type CollaborationRepoMemory struct {
+	WorkroomID       pgtype.UUID        `json:"workroom_id"`
+	Payload          []byte             `json:"payload"`
+	UpdatedByAgentID pgtype.UUID        `json:"updated_by_agent_id"`
+	UpdatedTaskID    pgtype.UUID        `json:"updated_task_id"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
 type CollaborationWorkroom struct {
 	ID             pgtype.UUID        `json:"id"`
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
