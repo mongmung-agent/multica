@@ -435,6 +435,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 		for _, assignment := range assignments {
 			if _, err := s.EnqueueTaskForCollaborationAssignment(ctx, assignment); err != nil {
 				slog.Warn("enqueue collaboration assignment failed", "assignment_id", util.UUIDToString(assignment.ID), "workroom_id", util.UUIDToString(assignment.WorkroomID), "error", err)
+				s.Collaboration.MarkAssignmentEnqueueFailed(ctx, assignment, err.Error())
 			}
 		}
 	}

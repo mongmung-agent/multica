@@ -11,6 +11,8 @@ const (
 	EventAssignmentCreated          = "assignment_created"
 	EventWorkerHandoffAdded         = "worker_handoff_added"
 	EventOrchestratorSynthesisAdded = "orchestrator_synthesis_added"
+	EventQuestionRaised             = "question_raised"
+	EventDecisionRecorded           = "decision_recorded"
 )
 
 type TaskContext struct {
@@ -74,6 +76,7 @@ type PromptContext struct {
 	TicketMemory   json.RawMessage   `json:"ticket_memory,omitempty"`
 	RepoMemory     json.RawMessage   `json:"repo_memory,omitempty"`
 	Assignment     map[string]any    `json:"assignment,omitempty"`
+	Assignments    []map[string]any  `json:"assignments,omitempty"`
 	RecentHandoffs []json.RawMessage `json:"recent_handoffs,omitempty"`
 	Events         []json.RawMessage `json:"events,omitempty"`
 }

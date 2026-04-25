@@ -454,6 +454,35 @@ func (q *Queries) ListCollaborationMemorySnapshots(ctx context.Context, workroom
 	return items, nil
 }
 
+const markCollaborationAssignmentCancelled = `-- name: MarkCollaborationAssignmentCancelled :one
+UPDATE collaboration_assignment
+SET status = 'cancelled', updated_at = now()
+WHERE id = $1
+RETURNING id, workroom_id, task_id, agent_id, role, goal, context, owned_scope, inputs, expected_handoff, status, created_at, updated_at, target_issue_id
+`
+
+func (q *Queries) MarkCollaborationAssignmentCancelled(ctx context.Context, id pgtype.UUID) (CollaborationAssignment, error) {
+	row := q.db.QueryRow(ctx, markCollaborationAssignmentCancelled, id)
+	var i CollaborationAssignment
+	err := row.Scan(
+		&i.ID,
+		&i.WorkroomID,
+		&i.TaskID,
+		&i.AgentID,
+		&i.Role,
+		&i.Goal,
+		&i.Context,
+		&i.OwnedScope,
+		&i.Inputs,
+		&i.ExpectedHandoff,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.TargetIssueID,
+	)
+	return i, err
+}
+
 const markCollaborationAssignmentHandoffSubmitted = `-- name: MarkCollaborationAssignmentHandoffSubmitted :one
 UPDATE collaboration_assignment
 SET status = 'handoff_submitted', updated_at = now()

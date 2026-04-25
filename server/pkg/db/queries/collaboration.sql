@@ -91,6 +91,12 @@ SET status = 'handoff_submitted', updated_at = now()
 WHERE id = $1
 RETURNING *;
 
+-- name: MarkCollaborationAssignmentCancelled :one
+UPDATE collaboration_assignment
+SET status = 'cancelled', updated_at = now()
+WHERE id = $1
+RETURNING *;
+
 -- name: CreateCollaborationEvent :one
 INSERT INTO collaboration_event (workroom_id, event_type, actor_agent_id, task_id, payload)
 VALUES ($1, $2, sqlc.narg(actor_agent_id), sqlc.narg(task_id), $3)

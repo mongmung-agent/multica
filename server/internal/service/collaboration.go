@@ -96,15 +96,14 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 		return nil, nil
 	}
 
-	handoff, raw := parseHandoffPayload(payload.Output)
-	if strings.TrimSpace(handoff.Summary) == "" {
-		handoff.Summary = strings.TrimSpace(payload.Output)
-	}
-	if strings.TrimSpace(handoff.Summary) == "" {
-		handoff.Summary = "Task completed without a structured handoff summary."
-	}
-
 	if taskContext.Role == collab.RoleWorker {
+		handoff, raw := parseHandoffPayload(payload.Output)
+		if strings.TrimSpace(handoff.Summary) == "" {
+			handoff.Summary = strings.TrimSpace(payload.Output)
+		}
+		if strings.TrimSpace(handoff.Summary) == "" {
+			handoff.Summary = "Task completed without a structured handoff summary."
+		}
 		if _, err := s.Queries.CreateCollaborationHandoff(ctx, db.CreateCollaborationHandoffParams{
 			WorkroomID:    workroomID,
 			AssignmentID:  assignmentID,
@@ -131,7 +130,7 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 		return nil, nil
 	}
 
-	orchestratorOutput := parseOrchestratorOutput(payload.Output)
+	orchestratorOutput, raw := parseOrchestratorOutput(payload.Output)
 	var createdAssignments []db.CollaborationAssignment
 	eventType := collab.EventBriefCreated
 	if handoffs, err := s.Queries.ListCollaborationHandoffs(ctx, workroomID); err == nil && len(handoffs) > 0 {
@@ -145,6 +144,20 @@ func (s *CollaborationService) RecordTaskCompletion(ctx context.Context, task db
 		Payload:      raw,
 	})
 	for _, spec := range orchestratorOutput.Assignments {
+		if reason := invalidAssignmentReason(spec); reason != "" {
+			_, _ = s.Queries.CreateCollaborationEvent(ctx, db.CreateCollaborationEventParams{
+				WorkroomID:   workroomID,
+				EventType:    collab.EventQuestionRaised,
+				ActorAgentID: task.AgentID,
+				TaskID:       task.ID,
+				Payload: mustJSON(map[string]any{
+					"reason":     reason,
+					"assignment": spec,
+					"source":     "orchestrator_output",
+				}),
+			})
+			continue
+		}
 		assignment, err := s.createAssignmentFromSpec(ctx, workroomID, spec)
 		if err != nil {
 			return createdAssignments, err
@@ -179,6 +192,19 @@ func (s *CollaborationService) TaskContextForAssignment(ctx context.Context, ass
 		AssignmentID:         util.UUIDToString(assignment.ID),
 		CurrentIssueID:       util.UUIDToString(issueID),
 		CollaborationVersion: 1,
+	})
+}
+
+func (s *CollaborationService) MarkAssignmentEnqueueFailed(ctx context.Context, assignment db.CollaborationAssignment, reason string) {
+	_, _ = s.Queries.MarkCollaborationAssignmentCancelled(ctx, assignment.ID)
+	_, _ = s.Queries.CreateCollaborationEvent(ctx, db.CreateCollaborationEventParams{
+		WorkroomID: assignment.WorkroomID,
+		EventType:  collab.EventQuestionRaised,
+		Payload: mustJSON(map[string]any{
+			"assignment_id": util.UUIDToString(assignment.ID),
+			"reason":        reason,
+			"source":        "assignment_enqueue",
+		}),
 	})
 }
 
@@ -221,15 +247,12 @@ func (s *CollaborationService) PromptContext(ctx context.Context, task db.AgentT
 	}
 	if taskContext.AssignmentID != "" {
 		if assignment, err := s.Queries.GetCollaborationAssignment(ctx, util.ParseUUID(taskContext.AssignmentID)); err == nil {
-			pc.Assignment = map[string]any{
-				"role":             assignment.Role,
-				"goal":             assignment.Goal,
-				"context":          assignment.Context,
-				"owned_scope":      json.RawMessage(assignment.OwnedScope),
-				"inputs":           json.RawMessage(assignment.Inputs),
-				"expected_handoff": json.RawMessage(assignment.ExpectedHandoff),
-			}
+			pc.Assignment = assignmentPayload(assignment)
 		}
+	}
+	assignments, _ := s.Queries.ListCollaborationAssignments(ctx, workroomID)
+	for _, assignment := range assignments {
+		pc.Assignments = append(pc.Assignments, assignmentPayload(assignment))
 	}
 	handoffs, _ := s.Queries.ListCollaborationHandoffs(ctx, workroomID)
 	for _, handoff := range handoffs {
@@ -269,6 +292,10 @@ func (s *CollaborationService) WorkroomSnapshot(ctx context.Context, issueID pgt
 		Kind:       "repo",
 	}); err == nil {
 		pc.RepoMemory = json.RawMessage(snapshot.Payload)
+	}
+	assignments, _ := s.Queries.ListCollaborationAssignments(ctx, workroom.ID)
+	for _, assignment := range assignments {
+		pc.Assignments = append(pc.Assignments, assignmentPayload(assignment))
 	}
 	handoffs, _ := s.Queries.ListCollaborationHandoffs(ctx, workroom.ID)
 	for _, handoff := range handoffs {
@@ -407,18 +434,8 @@ func (s *CollaborationService) createAssignment(ctx context.Context, workroom db
 }
 
 func (s *CollaborationService) createAssignmentFromSpec(ctx context.Context, workroomID pgtype.UUID, spec collab.AssignmentSpec) (db.CollaborationAssignment, error) {
-	workroom, err := s.Queries.GetCollaborationWorkroom(ctx, workroomID)
-	if err != nil {
-		return db.CollaborationAssignment{}, fmt.Errorf("load collaboration workroom for assignment: %w", err)
-	}
 	targetIssueID := util.ParseUUID(spec.IssueID)
-	if !targetIssueID.Valid {
-		targetIssueID = workroom.IssueID
-	}
 	role := spec.Role
-	if role != collab.RoleOrchestrator && role != collab.RoleWorker {
-		role = collab.RoleWorker
-	}
 	contextText := spec.Context
 	if strings.TrimSpace(contextText) == "" {
 		contextText = "Continue the shared collaboration workroom and leave a handoff another agent can use."
@@ -455,6 +472,22 @@ func (s *CollaborationService) createAssignmentFromSpec(ctx context.Context, wor
 	return assignment, nil
 }
 
+func invalidAssignmentReason(spec collab.AssignmentSpec) string {
+	if !util.ParseUUID(spec.IssueID).Valid {
+		return "assignment missing valid issue_id"
+	}
+	if !util.ParseUUID(spec.AgentID).Valid {
+		return "assignment missing valid agent_id"
+	}
+	if spec.Role != collab.RoleWorker && spec.Role != collab.RoleOrchestrator {
+		return "assignment role must be worker or orchestrator"
+	}
+	if strings.TrimSpace(spec.Goal) == "" {
+		return "assignment missing goal"
+	}
+	return ""
+}
+
 func parseHandoffPayload(output string) (collab.HandoffPayload, []byte) {
 	output = strings.TrimSpace(output)
 	if output == "" {
@@ -470,12 +503,18 @@ func parseHandoffPayload(output string) (collab.HandoffPayload, []byte) {
 	return payload, raw
 }
 
-func parseOrchestratorOutput(output string) collab.OrchestratorOutput {
+func parseOrchestratorOutput(output string) (collab.OrchestratorOutput, []byte) {
 	var parsed collab.OrchestratorOutput
-	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); err != nil {
-		return collab.OrchestratorOutput{}
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return collab.OrchestratorOutput{}, mustJSON(collab.OrchestratorOutput{})
 	}
-	return parsed
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		return collab.OrchestratorOutput{
+			Brief: output,
+		}, mustJSON(collab.OrchestratorOutput{Brief: output})
+	}
+	return parsed, []byte(output)
 }
 
 func issuePayload(issue db.Issue) map[string]any {
@@ -519,6 +558,23 @@ func commentsPayload(comments []db.Comment) []map[string]any {
 		out = append(out, commentPayload(comment))
 	}
 	return out
+}
+
+func assignmentPayload(assignment db.CollaborationAssignment) map[string]any {
+	return map[string]any{
+		"id":               util.UUIDToString(assignment.ID),
+		"workroom_id":      util.UUIDToString(assignment.WorkroomID),
+		"target_issue_id":  util.UUIDToString(assignment.TargetIssueID),
+		"task_id":          util.UUIDToString(assignment.TaskID),
+		"agent_id":         util.UUIDToString(assignment.AgentID),
+		"role":             assignment.Role,
+		"goal":             assignment.Goal,
+		"context":          assignment.Context,
+		"owned_scope":      json.RawMessage(assignment.OwnedScope),
+		"inputs":           json.RawMessage(assignment.Inputs),
+		"expected_handoff": json.RawMessage(assignment.ExpectedHandoff),
+		"status":           assignment.Status,
+	}
 }
 
 func mustJSON(value any) []byte {

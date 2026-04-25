@@ -231,6 +231,26 @@ func TestOrchestratorCompletionEnqueuesAssignmentTask(t *testing.T) {
 	`, orchestratorTaskID); err != nil {
 		t.Fatalf("mark orchestrator task running: %v", err)
 	}
+	var workroomID, orchestratorAssignmentID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT ca.workroom_id::text, ca.id::text
+		FROM collaboration_assignment ca
+		WHERE ca.task_id = $1
+	`, orchestratorTaskID).Scan(&workroomID, &orchestratorAssignmentID); err != nil {
+		t.Fatalf("load orchestrator assignment: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO collaboration_handoff (
+			workroom_id, assignment_id, task_id, agent_id, summary,
+			worked_on, evidence, validation, remaining_work, handoff_notes, raw_payload
+		) VALUES (
+			$1, $2, $3, $4, 'previous handoff',
+			'["worker prep"]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '["continue from here"]'::jsonb,
+			'{"summary":"previous handoff","handoff_notes":["continue from here"]}'::jsonb
+		)
+	`, workroomID, orchestratorAssignmentID, orchestratorTaskID, pmAgentID); err != nil {
+		t.Fatalf("seed prior handoff: %v", err)
+	}
 
 	orchestratorOutput, _ := json.Marshal(map[string]any{
 		"brief": "worker can continue",
@@ -253,15 +273,15 @@ func TestOrchestratorCompletionEnqueuesAssignmentTask(t *testing.T) {
 		t.Fatalf("complete orchestrator task: %v", err)
 	}
 
-	var workerTaskID, contextJSON string
+	var workerTaskID, contextJSON, workerAssignmentID string
 	if err := testPool.QueryRow(context.Background(), `
-		SELECT atq.id::text, atq.context::text
+		SELECT atq.id::text, atq.context::text, ca.id::text
 		FROM agent_task_queue atq
 		JOIN collaboration_assignment ca ON ca.task_id = atq.id
 		WHERE atq.issue_id = $1 AND atq.agent_id = $2 AND atq.status = 'queued'
 		ORDER BY atq.created_at DESC
 		LIMIT 1
-	`, childID, workerAgentID).Scan(&workerTaskID, &contextJSON); err != nil {
+	`, childID, workerAgentID).Scan(&workerTaskID, &contextJSON, &workerAssignmentID); err != nil {
 		t.Fatalf("load worker task from orchestrator assignment: %v", err)
 	}
 	if workerTaskID == "" {
@@ -271,6 +291,151 @@ func TestOrchestratorCompletionEnqueuesAssignmentTask(t *testing.T) {
 		if !strings.Contains(contextJSON, want) {
 			t.Fatalf("worker task context missing %q: %s", want, contextJSON)
 		}
+	}
+
+	var synthesisPayload string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT payload::text
+		FROM collaboration_event
+		WHERE workroom_id = $1 AND event_type = 'orchestrator_synthesis_added'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, workroomID).Scan(&synthesisPayload); err != nil {
+		t.Fatalf("load synthesis event: %v", err)
+	}
+	for _, want := range []string{"worker can continue", "assignments", "shared_notes"} {
+		if !strings.Contains(synthesisPayload, want) {
+			t.Fatalf("synthesis payload missing %q: %s", want, synthesisPayload)
+		}
+	}
+	if strings.Contains(synthesisPayload, `"summary"`) {
+		t.Fatalf("synthesis payload should not be handoff-wrapped: %s", synthesisPayload)
+	}
+
+	workerTask, err := testHandler.Queries.GetAgentTask(context.Background(), parseUUID(workerTaskID))
+	if err != nil {
+		t.Fatalf("load worker task: %v", err)
+	}
+	promptContext, err := testHandler.TaskService.Collaboration.PromptContext(context.Background(), workerTask)
+	if err != nil {
+		t.Fatalf("load worker prompt context: %v", err)
+	}
+	if len(promptContext.RecentHandoffs) == 0 || !strings.Contains(string(promptContext.RecentHandoffs[0]), "previous handoff") {
+		t.Fatalf("expected worker prompt context to include prior handoff, got %#v", promptContext.RecentHandoffs)
+	}
+	if promptContext.AssignmentID != workerAssignmentID {
+		t.Fatalf("expected prompt assignment %s, got %s", workerAssignmentID, promptContext.AssignmentID)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("GET", "/api/issues/"+parentID+"/collaboration", nil)
+	req = withURLParam(req, "id", parentID)
+	testHandler.GetIssueCollaboration(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetIssueCollaboration: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{"assignments", "recent_handoffs", "previous handoff"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("collaboration API missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestOrchestratorInvalidAssignmentRaisesQuestionWithoutTask(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	pmAgentID := createHandlerTestAgent(t, "Collaboration Invalid PM", nil)
+	var parentID string
+	defer func() {
+		if parentID == "" {
+			return
+		}
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE issue_id = $1`, parentID)
+		req := newRequest("DELETE", "/api/issues/"+parentID, nil)
+		req = withURLParam(req, "id", parentID)
+		testHandler.DeleteIssue(httptest.NewRecorder(), req)
+	}()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Invalid assignment parent",
+		"status":        "todo",
+		"assignee_type": "agent",
+		"assignee_id":   pmAgentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue parent: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var parent IssueResponse
+	json.NewDecoder(w.Body).Decode(&parent)
+	parentID = parent.ID
+
+	var orchestratorTaskID, workroomID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT atq.id::text, ca.workroom_id::text
+		FROM agent_task_queue atq
+		JOIN collaboration_assignment ca ON ca.task_id = atq.id
+		WHERE atq.issue_id = $1 AND atq.agent_id = $2
+		ORDER BY atq.created_at DESC
+		LIMIT 1
+	`, parentID, pmAgentID).Scan(&orchestratorTaskID, &workroomID); err != nil {
+		t.Fatalf("load orchestrator task: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE agent_task_queue
+		SET status = 'running', started_at = now()
+		WHERE id = $1
+	`, orchestratorTaskID); err != nil {
+		t.Fatalf("mark orchestrator task running: %v", err)
+	}
+
+	orchestratorOutput, _ := json.Marshal(map[string]any{
+		"brief": "invalid assignment should ask a question",
+		"assignments": []map[string]any{{
+			"agent_id": pmAgentID,
+			"role":     "worker",
+			"goal":     "missing issue id",
+		}},
+		"dependencies": []string{},
+		"shared_notes": []string{},
+		"next_steps":   []string{},
+	})
+	result, _ := json.Marshal(map[string]any{
+		"task_id": orchestratorTaskID,
+		"output":  string(orchestratorOutput),
+	})
+	if _, err := testHandler.TaskService.CompleteTask(context.Background(), parseUUID(orchestratorTaskID), result, "", ""); err != nil {
+		t.Fatalf("complete orchestrator task: %v", err)
+	}
+
+	var invalidTaskCount int
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM agent_task_queue
+		WHERE issue_id = $1 AND id <> $2
+	`, parentID, orchestratorTaskID).Scan(&invalidTaskCount); err != nil {
+		t.Fatalf("count unexpected tasks: %v", err)
+	}
+	if invalidTaskCount != 0 {
+		t.Fatalf("expected no task from invalid assignment, got %d", invalidTaskCount)
+	}
+
+	var questionPayload string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT payload::text
+		FROM collaboration_event
+		WHERE workroom_id = $1 AND event_type = 'question_raised'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, workroomID).Scan(&questionPayload); err != nil {
+		t.Fatalf("load question event: %v", err)
+	}
+	if !strings.Contains(questionPayload, "missing valid issue_id") {
+		t.Fatalf("question event did not explain invalid assignment: %s", questionPayload)
 	}
 }
 
